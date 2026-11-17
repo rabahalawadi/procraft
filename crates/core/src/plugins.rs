@@ -1555,6 +1555,11 @@ impl Plugins {
         self.hooks().keep_clear()
     }
 
+    /// Whether an enabled plugin asks for the macOS style top bar and window controls.
+    pub fn macos_top_bar(&self) -> bool {
+        self.hooks().macos_top_bar()
+    }
+
     /// Whether a plugin draws in-betweens: Animation Assist's frame options then offer In-between
     /// ([`crate::CanvasSession::add_inbetween`]).
     pub fn tweens(&self) -> bool {

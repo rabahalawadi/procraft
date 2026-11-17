@@ -65,12 +65,31 @@ pub fn frost(glass: &mut Vec<f32>, rect: Rect, corner: f32, ppp: f32) {
 /// The bar across the top of the canvas: artwork actions on the left, painting tools on the right.
 pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, brightness: f32, lit: &Lit) -> Bar {
     let mut bar = Bar::default();
-    let frame = egui::Frame::NONE.fill(argb(pc::BAR));
+    let macos = crate::window_controls::is_macos_topbar();
+    let frame = if macos {
+        egui::Frame::NONE
+            .fill(argb(pc::BAR))
+            .corner_radius(egui::CornerRadius { nw: 12, ne: 12, sw: 0, se: 0 })
+    } else {
+        egui::Frame::NONE.fill(argb(pc::BAR))
+    };
     egui::Panel::top("bar").exact_size(pc::BAR_HEIGHT).frame(frame).show(ui, |ui| {
         let r = ui.max_rect();
         let ctx = ui.ctx().clone();
-        let (tool_gap, action_gap) = pc::bar_gaps(r.width());
+        let (tool_gap, action_gap) = if macos {
+            pc::bar_gaps((r.width() - 86.0).max(300.0))
+        } else {
+            pc::bar_gaps(r.width())
+        };
         let cy = r.center().y;
+
+        // macOS 3 dots (traffic lights) on the left of top bar if enabled
+        let dots_hovered = if macos {
+            crate::window_controls::traffic_lights(ui, r.left() + 16.0, cy)
+        } else {
+            false
+        };
+
         let button = |x: f32, width: f32| {
             Rect::from_min_size(pos2(x, cy - pc::BAR_BUTTON_HEIGHT / 2.0), vec2(width, pc::BAR_BUTTON_HEIGHT))
         };
@@ -89,7 +108,11 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
             }
         };
 
-        let mut x = r.left() + pc::BAR_MARGIN;
+        let mut x = if macos {
+            r.left() + 16.0 + crate::window_controls::TRAFFIC_LIGHTS_WIDTH + 18.0
+        } else {
+            r.left() + pc::BAR_MARGIN
+        };
         let gallery = button(x, pc::GALLERY_WIDTH);
         tap(ui, BarButton::Gallery, gallery);
         text(
@@ -148,6 +171,22 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
             look.icon(ui, icon, rect.center(), 44.0, mix(argb(pc::BAR_GLYPH), argb(pc::BAR_GLYPH_SELECTED), l));
         }
         bar.rects.push((BarButton::Colour, colour_rect));
+
+        if macos {
+            let over_button = dots_hovered
+                || bar.rects.iter().any(|(_, rect)| {
+                    ui.input(|i| i.pointer.hover_pos().is_some_and(|p| rect.expand(4.0).contains(p)))
+                });
+            if !over_button {
+                let bar_res = ui.interact(r, ui.scope_id().with("top_bar_drag"), Sense::click_and_drag());
+                if bar_res.drag_started_by(egui::PointerButton::Primary) {
+                    crate::window_controls::request_drag();
+                }
+                if bar_res.double_clicked() {
+                    crate::window_controls::request_maximize();
+                }
+            }
+        }
     });
     bar
 }

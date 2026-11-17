@@ -338,10 +338,15 @@ impl Input {
     /// What the mouse pointer is now, at `at`: a tablet's pen moving it (X11 gives a pen as the
     /// mouse), as a pen or its eraser end with its pressure there; else the mouse.
     fn mouse_kind(&self, at: (f32, f32)) -> (PointerKind, f32) {
-        match (self.read_mouse_pen)(at) {
-            Some(pen) => (if pen.eraser { PointerKind::StylusEraser } else { PointerKind::Stylus }, pen.pressure),
-            None => (PointerKind::Mouse, 1.0),
+        if let Some(pen) = (self.read_mouse_pen)(at) {
+            return (if pen.eraser { PointerKind::StylusEraser } else { PointerKind::Stylus }, pen.pressure);
         }
+        if let Some((_, eraser)) = crate::pen::is_stylus_message() {
+            let kind = if eraser { PointerKind::StylusEraser } else { PointerKind::Stylus };
+            let pressure = crate::pen::mouse_pen().map(|p| p.pressure).unwrap_or(0.5);
+            return (kind, pressure);
+        }
+        (PointerKind::Mouse, 1.0)
     }
 
     /// The pressure of the mouse pointer's sample at `at`: a stroke a pen began keeps the pen's
@@ -631,12 +636,25 @@ impl Input {
         // a pen with its pressure, or a finger: as the system says which (a touch screen may give
         // its fingers a pressure too), else a pressure means a pen
         let force = touch.force.map(|f| f.normalized() as f32);
-        // (a pen landing or lifting has no force, its pressure being nothing: its own is taken)
-        let pen = match crate::pen::is_pen(touch.id) {
-            Some(true) => Some(force.or_else(|| crate::pen::pressure(touch.id)).unwrap_or(1.0)),
-            Some(false) => None,
-            None => force,
+        let pen_pressure = crate::pen::pressure(touch.id);
+        let effective_pressure = pen_pressure.or(force).or_else(|| crate::pen::mouse_pen().map(|m| m.pressure));
+        let is_pen_pointer = crate::pen::is_pen(touch.id) == Some(true)
+            || crate::pen::lean(touch.id).is_some()
+            || crate::pen::mouse_pen().is_some()
+            || (crate::pen::is_pen(touch.id).is_none() && effective_pressure.is_some());
+
+        let pen = if is_pen_pointer {
+            Some(effective_pressure.unwrap_or(1.0))
+        } else {
+            match crate::pen::is_pen(touch.id) {
+                Some(true) => Some(effective_pressure.unwrap_or(1.0)),
+                Some(false) => None,
+                None => effective_pressure,
+            }
         };
+        if pen.is_some() || is_pen_pointer {
+            crate::pen::pointer_kind(touch.id, true);
+        }
         // a pen turned over rubs out with its eraser end
         let kind = match pen {
             Some(_) if crate::pen::eraser_end(touch.id) => PointerKind::StylusEraser,
@@ -657,11 +675,13 @@ impl Input {
                     }
                     self.pen_panning = Some(touch.id);
                     self.cursor = Some(p);
+                    crate::pen::keep_pen_position(p);
                     return false;
                 }
                 _ if self.pen_panning != Some(touch.id) => {}
                 TouchPhase::Moved if self.key_drag.is_some() => {
                     self.cursor = Some(p);
+                    crate::pen::keep_pen_position(p);
                     session.key_drag_move(p.0, p.1, self.shift);
                     return true;
                 }
@@ -676,7 +696,9 @@ impl Input {
             }
             // the pointer goes with it: a pen down moves no mouse (the wheel zooms about where it
             // is, and what shows once it lifts starts from there)
+            self.inside = true;
             self.cursor = Some(p);
+            crate::pen::keep_pen_position(p);
         }
         let known = self.down.contains(&touch.id);
         match phase {

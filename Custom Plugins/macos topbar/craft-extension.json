@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.macos-topbar",
+  "name": "macOS Top Bar",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "Custom Plugins" },
+  "description": "Changes the window top bar to macOS style with traffic light controls. When disabled, standard window decorations are restored.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["macos_top_bar"],
+  "controls": [
+    { "key": "enabled", "type": "switch", "label": "macOS style top bar", "starts": true }
+  ]
+}

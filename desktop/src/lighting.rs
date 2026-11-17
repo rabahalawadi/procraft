@@ -230,9 +230,11 @@ impl LightingStudio {
                     self.environment_open = false;
                 }
                 ui.painter().rect_filled(bar, 0, argb(STUDIO_BAR));
+                let cy = bar.top() + 38.0;
+                let dots_hovered = crate::window_controls::traffic_lights(ui, bar.left() + 16.0, cy);
                 text(
                     ui.painter(),
-                    bar.min + vec2(32.0, 27.0),
+                    bar.min + vec2(84.0, 27.0),
                     Align2::LEFT_TOP,
                     "Lighting Studio",
                     20.0,
@@ -277,6 +279,22 @@ impl LightingStudio {
                 }
                 if ui.interact(done, ui.scope_id().with("studio done"), Sense::click()).clicked() {
                     self.close(session, true);
+                }
+
+                let over_element = dots_hovered
+                    || ui.input(|i| {
+                        i.pointer.hover_pos().is_some_and(|p| {
+                            done.expand(4.0).contains(p) || pill.expand(4.0).contains(p)
+                        })
+                    });
+                if !over_element {
+                    let res = ui.interact(bar, ui.scope_id().with("lighting_bar_drag"), Sense::click_and_drag());
+                    if res.drag_started_by(egui::PointerButton::Primary) {
+                        crate::window_controls::request_drag();
+                    }
+                    if res.double_clicked() {
+                        crate::window_controls::request_maximize();
+                    }
                 }
             });
         if !self.open {

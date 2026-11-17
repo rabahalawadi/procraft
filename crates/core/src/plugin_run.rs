@@ -195,6 +195,7 @@ const RADIAL_SEGMENTS: &str = "procraft_radial_segments";
 const HIDE_UNDO_NOTICE: &str = "procraft_hide_undo_notice";
 const INTERFACE_COLOUR: &str = "procraft_interface_colour";
 const PIN_PANELS: &str = "procraft_pin_panels";
+const MACOS_TOP_BAR: &str = "procraft_macos_top_bar";
 const OPACITY_TOGETHER: &str = "procraft_opacity_together";
 const RANDOMISE: &str = "procraft_randomise";
 const COLOUR_TRIANGLE: &str = "procraft_colour_triangle";
@@ -334,6 +335,8 @@ pub(crate) enum Hook {
     /// Brush engines of its own (interface 4): not named in `hooks`, but on it whenever its
     /// manifest lists `brush_engines`.
     Brushes,
+    /// Window top bar and controls styled as macOS traffic lights.
+    MacosTopBar,
 }
 
 impl Hook {
@@ -360,6 +363,7 @@ impl Hook {
             "layer_added" => Some(Hook::LayerAdded),
             "key_shortcut" => Some(Hook::KeyShortcut),
             "keep_clear" => Some(Hook::KeepClear),
+            "macos_top_bar" => Some(Hook::MacosTopBar),
             _ => None,
         }
     }
@@ -390,6 +394,7 @@ impl Hook {
             Hook::KeepClear => "This plugin can keep the interface clear of the status bar and the camera.",
             Hook::Layers => "This plugin can add kinds of layer whose strokes it keeps, and draw them again.",
             Hook::Brushes => "This plugin can read brush files and draw their brushes its own way.",
+            Hook::MacosTopBar => "This plugin can change the window top bar style to macOS style with traffic light controls.",
         }
     }
 
@@ -409,6 +414,7 @@ impl Hook {
             Hook::InterfaceColour => exports(module, INTERFACE_COLOUR, &[ValType::I32], &[ValType::I32]),
             Hook::PinPanels => exports(module, PIN_PANELS, &[], &[ValType::I32]),
             Hook::KeepClear => exports(module, KEEP_CLEAR, &[], &[ValType::I32]),
+            Hook::MacosTopBar => exports(module, MACOS_TOP_BAR, &[], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -759,6 +765,7 @@ pub(crate) struct Running {
     interface_colour: Option<TypedFunc<i32, i32>>,
     pin_panels: Option<TypedFunc<(), i32>>,
     keep_clear: Option<TypedFunc<(), i32>>,
+    macos_top_bar: Option<TypedFunc<(), i32>>,
     opacity_together: Option<TypedFunc<(), i32>>,
     randomise: Option<TypedFunc<(i32, i32), f32>>,
     colour_triangle: Option<TypedFunc<(), i32>>,
@@ -900,6 +907,7 @@ impl Running {
             let interface_colour = instance.get_typed_func(&store, INTERFACE_COLOUR).ok();
             let pin_panels = instance.get_typed_func(&store, PIN_PANELS).ok();
             let keep_clear = instance.get_typed_func(&store, KEEP_CLEAR).ok();
+            let macos_top_bar = instance.get_typed_func(&store, MACOS_TOP_BAR).ok();
             let opacity_together = instance.get_typed_func(&store, OPACITY_TOGETHER).ok();
             let randomise = instance.get_typed_func(&store, RANDOMISE).ok();
             let colour_triangle = instance.get_typed_func(&store, COLOUR_TRIANGLE).ok();
@@ -994,6 +1002,7 @@ impl Running {
                 interface_colour,
                 pin_panels,
                 keep_clear,
+                macos_top_bar,
                 opacity_together,
                 randomise,
                 colour_triangle,
@@ -1881,6 +1890,17 @@ impl Running {
         let said = guarded(|| {
             store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
             keep_clear.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// Whether it says the top bar uses macOS style window controls.
+    pub(crate) fn macos_top_bar(&mut self) -> Result<bool, Stop> {
+        let Running { store, macos_top_bar, .. } = self;
+        let Some(macos_top_bar) = macos_top_bar else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            macos_top_bar.call(&mut *store, ()).map_err(|e| stop_of(&e))
         })?;
         Ok(said != 0)
     }

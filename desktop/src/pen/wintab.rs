@@ -173,6 +173,9 @@ fn started() -> Instant {
 
 /// The system's pointer messages carry a pen now (Windows Ink is on for it).
 pub fn ink_pen() {
+    if super::is_use_wintab() {
+        return;
+    }
     let quiet = !ink_lately();
     INK_AT.store((started().elapsed().as_millis() as u64).max(1), Ordering::Relaxed);
     // WinTab's first packets can come before the system's first message: what they said of the
@@ -309,11 +312,14 @@ pub fn activated() {
 /// A WinTab message to the window: a packet read and handed on as the mouse pen's, or the pen
 /// gone. True if it was one.
 pub fn message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
+    if !super::is_use_wintab() {
+        return false;
+    }
     match msg {
         WT_PACKET => {
             let Ok(tablet) = TABLET.lock() else { return true };
             let Some(t) = tablet.as_ref() else { return true };
-            if ink_lately() {
+            if ink_lately() && !super::is_use_wintab() {
                 return true;
             }
             let mut p = Packet::default();

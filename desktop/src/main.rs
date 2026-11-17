@@ -66,6 +66,7 @@ mod transform;
 mod transform_numeric;
 mod ui;
 mod video;
+mod window_controls;
 mod zoom;
 
 use std::sync::Arc;
@@ -278,7 +279,10 @@ fn main() {
         dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
         interface_touches: input::InterfaceTouches::default(),
+        close_requested: false,
         closed: false,
+        modifiers: winit::event::Modifiers::default(),
+        macos_top_bar: false,
     };
     // a panic on the window's thread ends the app: said, rather than the window just vanishing
     // (its message and place are in the log already)
@@ -346,8 +350,13 @@ struct App {
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
     /// Which touch the interface follows: a finger on it beside a hand resting on the canvas.
     interface_touches: input::InterfaceTouches,
+    /// Close was requested via the window control traffic lights.
+    close_requested: bool,
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
     closed: bool,
+    modifiers: winit::event::Modifiers,
+    /// Whether macOS top bar styling and controls are active.
+    macos_top_bar: bool,
 }
 
 /// The app's icon, for the window's title bar and the task bar.
@@ -368,11 +377,15 @@ impl ApplicationHandler for App {
         if self.screen.is_some() {
             return;
         }
+        let macos = self.ui.plugins().macos_top_bar();
+        self.macos_top_bar = macos;
+        crate::window_controls::set_macos_topbar(macos);
         let attributes = Window::default_attributes()
             .with_title("ProCraft")
             .with_window_icon(window_icon())
             .with_inner_size(LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(LogicalSize::new(640.0, 480.0))
+            .with_decorations(!macos)
             // opened for a test (PROCRAFT_BACKGROUND set), it leaves the keyboard where it was
             .with_active(std::env::var_os("PROCRAFT_BACKGROUND").is_none());
         // on Linux the desktop's menus match the window to the app's entry (procraft.desktop)
@@ -474,15 +487,20 @@ impl ApplicationHandler for App {
         if response.repaint && event != WindowEvent::RedrawRequested {
             redraw_paced(&screen.window, self.last_frame, self.gap, &mut self.input_frame);
         }
-        // F11: the window fills its screen without its frame (a pen display's whole screen for
-        // the canvas, as the tablet's), or goes back to a window
+        if let WindowEvent::ModifiersChanged(m) = &event {
+            self.modifiers = *m;
+        }
+        // F11 / Alt+Enter: the window fills its screen (exclusive or borderless fullscreen), or goes back to a window
         if let WindowEvent::KeyboardInput { event: key, .. } = &event
             && key.state.is_pressed()
             && !key.repeat
-            && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11)
         {
-            let full = screen.window.fullscreen().is_none();
-            screen.window.set_fullscreen(full.then_some(winit::window::Fullscreen::Borderless(None)));
+            let is_f11 = key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11);
+            let is_alt_enter = (self.modifiers.state().alt_key() || screen.egui.egui_ctx().input(|i| i.modifiers.alt))
+                && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter);
+            if is_f11 || is_alt_enter {
+                toggle_fullscreen_window(screen, self.ui.prefs.exclusive_fullscreen);
+            }
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -568,6 +586,25 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.handle_window_actions();
+        if self.close_requested {
+            self.close_requested = false;
+            let waits = self.hide_while_opening();
+            if self.leave_artwork() {
+                files::finish_writing();
+                files::tell_what_was_told();
+                self.closed = true;
+                event_loop.exit();
+                return;
+            } else if waits && let Some(screen) = &self.screen {
+                screen.window.set_visible(true);
+            }
+        }
+        if let Some(window) = self.screen.as_ref().map(|s| (s.window.id(), s.window.scale_factor())) {
+            for event in pen::take_events(window.1) {
+                self.window_event(event_loop, window.0, event);
+            }
+        }
         // files opened from the Finder meanwhile come in as files dropped on the window do
         #[cfg(target_os = "macos")]
         {
@@ -636,6 +673,28 @@ impl ApplicationHandler for App {
     }
 }
 
+fn toggle_fullscreen_window(screen: &mut Screen, exclusive: bool) {
+    if screen.window.fullscreen().is_some() {
+        screen.window.set_fullscreen(None);
+        return;
+    }
+    let monitor = screen.window.current_monitor().or_else(|| screen.window.primary_monitor());
+    if exclusive {
+        if let Some(ref m) = monitor {
+            let target_size = m.size();
+            let best_mode = m
+                .video_modes()
+                .filter(|vm| vm.size() == target_size)
+                .max_by_key(|vm| vm.refresh_rate_millihertz());
+            if let Some(mode) = best_mode {
+                screen.window.set_fullscreen(Some(winit::window::Fullscreen::Exclusive(mode)));
+                return;
+            }
+        }
+    }
+    screen.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+}
+
 impl App {
     /// Shows `session` in the window, in place of the artwork open.
     fn show(&mut self, session: Arc<CanvasSession>) {
@@ -697,6 +756,49 @@ impl App {
         let Some(pad) = studio.pad.clone() else { return false };
         studio.pad_texture = Some(screen.draw_pad(&pad, size, self.started));
         pad.wants_frame()
+    }
+
+    fn handle_window_actions(&mut self) {
+        let macos = self.ui.plugins().macos_top_bar();
+        crate::window_controls::set_macos_topbar(macos);
+        if self.macos_top_bar != macos {
+            self.macos_top_bar = macos;
+            if let Some(screen) = &self.screen {
+                screen.window.set_decorations(!macos);
+                screen.window.request_redraw();
+            }
+        }
+        if let Some(action) = window_controls::take_pending_action() {
+            match action {
+                window_controls::WindowControlAction::Close => {
+                    self.close_requested = true;
+                    if let Some(screen) = &self.screen {
+                        screen.window.request_redraw();
+                    }
+                }
+                window_controls::WindowControlAction::Minimize => {
+                    if let Some(screen) = &self.screen {
+                        screen.window.set_minimized(true);
+                    }
+                }
+                window_controls::WindowControlAction::Maximize => {
+                    if let Some(screen) = &self.screen {
+                        screen.window.set_maximized(!screen.window.is_maximized());
+                    }
+                }
+                window_controls::WindowControlAction::Drag => {
+                    if let Some(screen) = &self.screen {
+                        let _ = screen.window.drag_window();
+                    }
+                }
+            }
+        }
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        if let Some(screen) = self.screen.as_mut() {
+            toggle_fullscreen_window(screen, self.ui.prefs.exclusive_fullscreen);
+        }
     }
 
     /// Runs the interface, draws the canvas and the interface over it, and does what was asked.
@@ -809,6 +911,7 @@ impl App {
         for action in std::mem::take(&mut self.ui.actions) {
             self.act(action, &session);
         }
+        self.handle_window_actions();
     }
 
     /// The gallery over the whole window, and what a tap in it asked for.
@@ -873,6 +976,7 @@ impl App {
             self.title = "ProCraft".into();
         }
         self.zoom_on();
+        self.handle_window_actions();
         // Project canvas is black while the gallery shows
         if let (Some(p), Some(screen)) = (self.projection.as_mut(), &self.screen) {
             p.draw(&screen.gpu, None);
@@ -1416,6 +1520,10 @@ impl App {
                 if let Some(export) = session.plugin_exports().into_iter().nth(usize::from(i)) {
                     files::export_plugin(session, &export.key, &mut self.ui.export_card);
                 }
+                None
+            }
+            Action::ToggleFullscreen => {
+                self.toggle_fullscreen();
                 None
             }
         };

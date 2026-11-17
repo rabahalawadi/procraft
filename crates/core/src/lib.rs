@@ -735,6 +735,7 @@ pub(crate) struct State {
     /// Its input as the stroke took it, for a shape to go back to.
     drawn_samples: Vec<Sample>,
     shape: Option<quickshape::ShapeEdit>,
+    pub(crate) shape_dirty: bool,
     /// The open stroke as it began, and the last stroke kept, for QuickShape afterwards.
     began: Option<quickshape::LastStroke>,
     last_stroke: Option<quickshape::LastStroke>,
@@ -826,6 +827,7 @@ impl State {
 
     /// Finishes an open stroke.
     fn finish_stroke(&mut self) {
+        self.ensure_shape_drawn();
         let shape = self.shape.take();
         // a stroke on a model ends there, as the pen lifting would end it
         if self.scene_shown() && self.scene.as_ref().is_some_and(|s| s.stroking) {
@@ -1707,6 +1709,7 @@ impl CanvasSession {
             drawn_samples: Vec::new(),
             drawn_at: 0.0,
             shape: None,
+            shape_dirty: false,
             began: None,
             last_stroke: None,
             kept_shape: None,

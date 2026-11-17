@@ -121,6 +121,9 @@ pub enum Act {
     BrushCursor,
     ProjectCanvas,
     ResetInput,
+    ToggleTabletApi,
+    ToggleExclusiveFullscreen,
+    ToggleFullscreen,
 }
 
 /// The panel's pages: the tabs, or one Prefs opened.
@@ -391,6 +394,18 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 ],
                 vec![
                     Button("Pressure and Smoothing", None, Some(Act::Page(Page::Pressure))),
+                    #[cfg(windows)]
+                    Button(
+                        "Tablet API",
+                        Some(if prefs.use_wintab { "WinTab" } else { "Windows Ink" }),
+                        Some(Act::ToggleTabletApi),
+                    ),
+                    Switch(
+                        "Exclusive fullscreen",
+                        prefs.exclusive_fullscreen,
+                        Some(Act::ToggleExclusiveFullscreen),
+                    ),
+                    Button("Fullscreen", None, Some(Act::ToggleFullscreen)),
                     Button("Gesture controls", None, Some(Act::GestureControls)),
                     Button("Plugins", None, Some(Act::Page(Page::Plugins))),
                 ],
@@ -685,6 +700,17 @@ impl Actions {
             }
             Some(Tapped::Act(Act::ResetInput)) => {
                 prefs.reset_input();
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::ToggleTabletApi)) => {
+                prefs.use_wintab = !prefs.use_wintab;
+                crate::pen::set_use_wintab(prefs.use_wintab);
+                prefs.keep();
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::ToggleExclusiveFullscreen)) => {
+                prefs.exclusive_fullscreen = !prefs.exclusive_fullscreen;
+                prefs.keep();
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(a)) => Some(a),

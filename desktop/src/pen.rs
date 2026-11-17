@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Each pen pointer's last lean: radians from upright, and the direction it leans (radians
 /// clockwise from screen-up), as the strokes take them; none for a pen that doesn't say.
@@ -26,9 +26,73 @@ static LATEST: Mutex<Option<u64>> = Mutex::new(None);
 /// Each pen pointer's last flags (its barrel button held, its eraser end down).
 static FLAGS: Mutex<Option<HashMap<u64, u32>>> = Mutex::new(None);
 
+/// The pen pointer's latest position in window coordinates (client pixels), updated directly from
+/// pointer messages so that hover tracking never relies solely on synthetic WM_MOUSEMOVE messages.
+static PEN_POSITION: Mutex<Option<(f32, f32)>> = Mutex::new(None);
+
+/// Current window DPI scale factor.
+static SCALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1.0_f64.to_bits());
+
+pub fn set_window_scale(scale: f64) {
+    SCALE.store(scale.to_bits(), Ordering::Relaxed);
+}
+
+pub fn window_scale() -> f64 {
+    f64::from_bits(SCALE.load(Ordering::Relaxed)).max(0.1)
+}
+
+/// Queued pen events on Windows to be processed cleanly by the application event loop.
+static EVENTS: Mutex<Vec<PenEvent>> = Mutex::new(Vec::new());
+
+pub fn queue_pen_event(event: PenEvent) -> bool {
+    if let Ok(mut events) = EVENTS.lock() {
+        if let Some(last) = events.last_mut() {
+            match (&last, &event) {
+                (PenEvent::Move { id: id1, .. }, PenEvent::Move { id: id2, x, y, pressure }) if id1 == id2 => {
+                    *last = PenEvent::Move { id: *id1, x: *x, y: *y, pressure: *pressure };
+                    return false;
+                }
+                (PenEvent::Hover { id: id1, .. }, PenEvent::Hover { id: id2, x, y }) if id1 == id2 => {
+                    *last = PenEvent::Hover { id: *id1, x: *x, y: *y };
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        events.push(event);
+        true
+    } else {
+        false
+    }
+}
+
 /// How many times a pen's first and second barrel buttons went down since the app last asked.
 static PRESSES: AtomicUsize = AtomicUsize::new(0);
 static SECOND_PRESSES: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether tablet input uses WinTab on Windows (true) or Windows Ink (false).
+static USE_WINTAB: AtomicBool = AtomicBool::new(false);
+
+/// Switches tablet input mode between WinTab and Windows Ink.
+pub fn set_use_wintab(wintab: bool) {
+    USE_WINTAB.store(wintab, Ordering::Relaxed);
+}
+
+/// Whether WinTab is currently selected for tablet input.
+pub fn is_use_wintab() -> bool {
+    USE_WINTAB.load(Ordering::Relaxed)
+}
+
+/// Whether a pen is currently active near or on the digitizer.
+static PEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_pen_active(active: bool) {
+    PEN_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+pub fn is_pen_active() -> bool {
+    PEN_ACTIVE.load(Ordering::Relaxed)
+}
 
 /// Each pointer the system has said is a pen (true) or a finger (false).
 static KINDS: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
@@ -151,12 +215,36 @@ fn keep_pose(id: u64, lean: Option<(f32, f32)>, roll: Option<f32>) {
     }
 }
 
+/// The pen pointer's position in window pixels as directly read from the pointer messages, if one is near.
+#[allow(dead_code)]
+pub fn pen_position() -> Option<(f32, f32)> {
+    PEN_POSITION.lock().ok()?.as_ref().copied()
+}
+
+pub(crate) fn keep_pen_position(pos: (f32, f32)) {
+    if let Ok(mut p) = PEN_POSITION.lock() {
+        *p = Some(pos);
+    }
+}
+
+pub(crate) fn clear_pen_position() {
+    if let Ok(mut p) = PEN_POSITION.lock() {
+        *p = None;
+    }
+}
+
+/// Whether a pen is currently touching or hovering near the window.
+#[allow(dead_code)]
+pub fn is_pen_near() -> bool {
+    PEN_POSITION.lock().ok().and_then(|p| *p).is_some()
+}
+
 /// No pen is near the window any more.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn pen_gone() {
+pub(crate) fn pen_gone() {
     if let Ok(mut latest) = LATEST.lock() {
         *latest = None;
     }
+    clear_pen_position();
 }
 
 /// Whether the pen that is pointer `id` is turned over, its eraser end on the screen.
@@ -245,6 +333,15 @@ pub fn mouse_pen_at(at: (f32, f32)) -> Option<MousePen> {
 pub fn mouse_pen_fine_at(at: (f32, f32)) -> Option<(f32, f32)> {
     mouse_pen()?;
     reading_at(at)?.fine
+}
+
+/// Whether the current Windows message extra info indicates a pen/stylus input.
+/// Returns Some((is_stylus, is_eraser)).
+pub fn is_stylus_message() -> Option<(bool, bool)> {
+    #[cfg(windows)]
+    return system::is_stylus_message();
+    #[cfg(not(windows))]
+    None
 }
 
 /// The latest reading of the pen moving the mouse pointer made with the pointer at `at`.
@@ -387,8 +484,8 @@ fn lean_of(tilt_x: f32, tilt_y: f32) -> (f32, f32) {
 
 /// Starts reading the pen's lean from the pointer messages to `window`.
 #[cfg(windows)]
-pub fn watch(window: &winit::window::Window, _wake: winit::event_loop::EventLoopProxy<()>) {
-    system::watch(window);
+pub fn watch(window: &winit::window::Window, wake: winit::event_loop::EventLoopProxy<()>) {
+    system::watch(window, wake);
 }
 
 /// Starts reading a tablet's pen: under X11 its pressure, lean and eraser end from its XInput
@@ -417,6 +514,8 @@ pub fn watch(_window: &winit::window::Window, _wake: winit::event_loop::EventLoo
 pub fn stop() {
     #[cfg(target_os = "linux")]
     wayland::stop();
+    #[cfg(windows)]
+    system::stop();
 }
 
 /// The cursor the interface wants, shown for a pen hovering the window as for the mouse.
@@ -427,9 +526,8 @@ pub fn set_cursor(_icon: egui::CursorIcon) {
 
 /// What a pen read by the app itself did: where in the window it is in logical pixels, its
 /// pressure 0..1.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum PenEvent {
+pub enum PenEvent {
     /// Over the window, its tip up.
     Hover {
         id: u64,
@@ -462,9 +560,18 @@ enum PenEvent {
 /// a pen on Windows (touches with a force, and the pointer moving as it hovers), for a window at
 /// `scale` physical pixels a logical one.
 pub fn take_events(scale: f64) -> Vec<winit::event::WindowEvent> {
+    set_window_scale(scale);
     #[cfg(target_os = "linux")]
     let events = wayland::take_events();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    let events: Vec<PenEvent> = {
+        if let Ok(mut ev) = EVENTS.lock() {
+            std::mem::take(&mut *ev)
+        } else {
+            Vec::new()
+        }
+    };
+    #[cfg(not(any(target_os = "linux", windows)))]
     let events: Vec<PenEvent> = Vec::new();
     events.into_iter().map(|e| window_event(e, scale)).collect()
 }
@@ -698,17 +805,20 @@ mod tablet {
 mod system {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
     use windows::Win32::UI::Controls::{POINTER_DEVICE_INFO, POINTER_DEVICE_TYPE, POINTER_DEVICE_TYPE_INTEGRATED_PEN};
     use windows::Win32::UI::Input::Pointer::{
         GetPointerDevice, GetPointerFrameInfo, GetPointerInfo, GetPointerPenInfo, GetPointerType, POINTER_INFO,
         POINTER_PEN_INFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
-        WM_ACTIVATE, WM_ENDSESSION, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
+        CallWindowProcW, DefWindowProcW, GetMessageExtraInfo, GetWindowRect, GWLP_WNDPROC, IsZoomed,
+        PEN_FLAG_ERASER, PEN_FLAG_INVERTED, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
+        WM_ACTIVATE, WM_ENDSESSION, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCHITTEST, WM_POINTERCAPTURECHANGED,
+        WM_POINTERDOWN, WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -718,7 +828,7 @@ mod system {
     const PEN_MASK_TILT_X: u32 = 0x4;
     const PEN_MASK_TILT_Y: u32 = 0x8;
     /// A pointer message's flags (its `wparam`'s high word): the pointer touches the screen.
-    const POINTER_FLAG_INCONTACT: usize = 0x4;
+    const POINTER_FLAG_INCONTACT: u32 = 0x4;
     /// A pointer's flags, as a message's and as a frame gives them: the system took it back, and
     /// what it did is to be undone.
     const POINTER_FLAG_CANCELED: u32 = 0x8000;
@@ -726,13 +836,119 @@ mod system {
     /// winit's procedure for the window, called after ours.
     static WINIT: AtomicIsize = AtomicIsize::new(0);
 
+    /// Event loop wake proxy to deliver pen events immediately.
+    static WAKE: Mutex<Option<winit::event_loop::EventLoopProxy<()>>> = Mutex::new(None);
+
+    fn wake() {
+        if let Ok(w) = WAKE.lock()
+            && let Some(wake) = w.as_ref()
+        {
+            let _ = wake.send_event(());
+        }
+    }
+
+    pub fn stop() {
+        if let Ok(mut w) = WAKE.lock() {
+            *w = None;
+        }
+    }
+
+    /// Whether the current Windows message extra info indicates a pen/stylus input.
+    pub fn is_stylus_message() -> Option<(bool, bool)> {
+        const MI_WP_SIGNATURE: usize = 0xFF515700;
+        const SIGNATURE_MASK: usize = 0xFFFFFF00;
+        let extra = unsafe { GetMessageExtraInfo() };
+        let val = extra.0 as usize;
+        if (val & SIGNATURE_MASK) == MI_WP_SIGNATURE && (val & 0x80) == 0 {
+            let eraser = (val & 0x01) != 0;
+            Some((true, eraser))
+        } else {
+            None
+        }
+    }
+
+    /// Dynamic maximum pressure detected from the hardware digitizer.
+    static MAX_PRESSURE: AtomicU32 = AtomicU32::new(1024);
+
     /// The pen devices named in the log so far.
     static LOGGED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-    pub fn watch(window: &winit::window::Window) {
+    /// Initializes Direct Win32 Ink APIs using the official microsoft/windows crate.
+    fn init_direct_ink_api() {
+        use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+        use windows::Win32::UI::Input::Ink::{IInkDesktopHost, InkDesktopHost};
+
+        let res: windows::core::Result<IInkDesktopHost> =
+            unsafe { CoCreateInstance(&InkDesktopHost, None, CLSCTX_INPROC_SERVER) };
+        match res {
+            Ok(_) => log::info!("Direct Win32 Ink APIs (windows crate): InkDesktopHost ready"),
+            Err(e) => log::info!("Direct Win32 Ink APIs (windows crate): InkDesktopHost note: {e}"),
+        }
+    }
+
+    /// Configures MicrosoftTabletPenServiceProperty on the window to eliminate OS gesture lag.
+    fn configure_tablet_properties(hwnd: HWND) {
+        use windows::Win32::System::DataExchange::GlobalAddAtomW;
+        use windows::Win32::UI::WindowsAndMessaging::SetPropW;
+        use windows::core::w;
+
+        let atom = unsafe { GlobalAddAtomW(w!("MicrosoftTabletPenServiceProperty")) };
+        if atom != 0 {
+            // TABLET_DISABLE_PRESSANDHOLD    = 0x00000001
+            // TABLET_DISABLE_PENTAPFEEDBACK  = 0x00000008
+            // TABLET_DISABLE_PENBARRELFEEDBACK = 0x00000010
+            // TABLET_DISABLE_TOUCHUIFORCEON  = 0x00000100
+            // TABLET_DISABLE_TOUCHUIFORCEOFF = 0x00000200
+            // TABLET_DISABLE_TOUCHSWITCH     = 0x00008000
+            // TABLET_DISABLE_FLICKS          = 0x00010000
+            // TABLET_ENABLE_MULTITOUCHDATA   = 0x01000000
+            let flags: usize = 0x01018319;
+            let _ = unsafe {
+                SetPropW(
+                    hwnd,
+                    windows::core::PCWSTR(atom as usize as *const u16),
+                    Some(windows::Win32::Foundation::HANDLE(flags as *mut _)),
+                )
+            };
+            log::info!("Windows Ink: configured MicrosoftTabletPenServiceProperty (zero gesture lag)");
+        }
+    }
+
+    pub fn watch(window: &winit::window::Window, wake_proxy: winit::event_loop::EventLoopProxy<()>) {
         let Ok(handle) = window.window_handle() else { return };
         let RawWindowHandle::Win32(handle) = handle.as_raw() else { return };
         let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
+
+        // 1. Direct Win32 Ink COM Host initialization
+        init_direct_ink_api();
+
+        // 2. Unregister legacy touch window registration done by winit!
+        // winit calls RegisterTouchWindow, trapping pen input in the legacy Windows 7 touch pipeline
+        // (which strips pressure data: force = None). Unregistering it restores the native WM_POINTER pipeline!
+        let _ = unsafe { windows::Win32::UI::Input::Touch::UnregisterTouchWindow(hwnd) };
+        log::info!("Windows Ink: Unregistered legacy touch window; activated native WM_POINTER pipeline");
+
+        // 3. Disable OS tablet gesture hesitation (press-and-hold delays, flick gestures)
+        configure_tablet_properties(hwnd);
+
+        // 4. Enable Windows 11 native macOS-style rounded corners via DWM
+        use windows::Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        };
+        let corner_preference = DWMWCP_ROUND;
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner_preference as *const _ as *const core::ffi::c_void,
+                std::mem::size_of_val(&corner_preference) as u32,
+            )
+        };
+
+        if let Ok(mut w) = WAKE.lock() {
+            *w = Some(wake_proxy);
+        }
+
         let ours = pointer_messages as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
         // SAFETY: the window is this thread's own and lives as long as the app; winit's procedure,
         // kept, is called for every message after ours
@@ -742,18 +958,13 @@ mod system {
         super::wintab::open(hwnd);
     }
 
-    /// Notes what the other pointers in `id`'s frame are, and any taken back. winit takes a whole
-    /// frame from its first message and skips the rest, so a second finger's own messages never
-    /// come here: unnoted, a finger with a pressure would be taken for a pen, and draw whatever the
-    /// finger settings say.
+    /// Notes what the other pointers in `id`'s frame are, and any taken back.
     fn frame_kinds(id: u32) {
         let mut count = 0;
-        // SAFETY: a count to fill, no pointers asked for yet
         if unsafe { GetPointerFrameInfo(id, &mut count, None) }.is_err() || count < 2 {
             return;
         }
         let mut pointers = vec![POINTER_INFO::default(); count as usize];
-        // SAFETY: room for the `count` pointers it said there are
         if unsafe { GetPointerFrameInfo(id, &mut count, Some(pointers.as_mut_ptr())) }.is_err() {
             return;
         }
@@ -767,15 +978,11 @@ mod system {
         }
     }
 
-    /// The kind of device pen `id` belongs to, as the system has it: built into a screen or not
-    /// (from the digitizer's own report), with its name in the log the first time it is heard
-    /// from.
+    /// The kind of device pen `id` belongs to, as the system has it.
     fn pen_device(id: u32) -> Option<POINTER_DEVICE_TYPE> {
         let mut pointer = POINTER_INFO::default();
-        // SAFETY: `pointer` is an info to fill for this pointer
         unsafe { GetPointerInfo(id, &mut pointer) }.ok()?;
         let mut device = POINTER_DEVICE_INFO::default();
-        // SAFETY: `device` is an info to fill for the device the system just named
         unsafe { GetPointerDevice(pointer.sourceDevice, &mut device) }.ok()?;
         let name = device.productString;
         let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
@@ -786,68 +993,167 @@ mod system {
         Some(device.pointerDeviceType)
     }
 
-    /// A pen's pointer message: its pressure and tilt kept by pointer, then the message on to
-    /// winit (a hovering pen's to the system, as the mouse's). And the session's end noted.
+    /// A pen's pointer message: its pressure, tilt and coordinates captured with zero lag,
+    /// feeding both the direct pointer channel and the mouse pen channel.
     unsafe extern "system" fn pointer_messages(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        // Windows shutting down or signing out ends the app without the event loop's end: the run
-        // ended all the same, so the next start keeps its graphics backend (else it would move on,
-        // as after a crash; the artwork open is autosaved)
+        // For custom undecorated windows (macOS-style titlebar), provide native border resize hit-testing
+        if msg == WM_NCHITTEST && unsafe { !IsZoomed(hwnd).as_bool() } {
+            let mut rect = RECT::default();
+            if unsafe { GetWindowRect(hwnd, &mut rect).is_ok() } {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let border = 8;
+                let on_left = x >= rect.left && x < rect.left + border;
+                let on_right = x < rect.right && x >= rect.right - border;
+                let on_top = y >= rect.top && y < rect.top + border;
+                let on_bottom = y < rect.bottom && y >= rect.bottom - border;
+
+                if on_top && on_left { return LRESULT(13); } // HTTOPLEFT
+                if on_top && on_right { return LRESULT(14); } // HTTOPRIGHT
+                if on_bottom && on_left { return LRESULT(16); } // HTBOTTOMLEFT
+                if on_bottom && on_right { return LRESULT(17); } // HTBOTTOMRIGHT
+                if on_top { return LRESULT(12); } // HTTOP
+                if on_bottom { return LRESULT(15); } // HTBOTTOM
+                if on_left { return LRESULT(10); } // HTLEFT
+                if on_right { return LRESULT(11); } // HTRIGHT
+            }
+        }
+
         if msg == WM_ENDSESSION && wparam.0 != 0 {
             crate::startup::gpu_ended();
         }
-        // WinTab's packets: the pen as the mouse, with its pressure (Windows Ink off)
-        if super::wintab::message(hwnd, msg, wparam, lparam) {
-            return LRESULT(0);
+
+        // WinTab mode handling
+        if super::is_use_wintab() {
+            if super::wintab::message(hwnd, msg, wparam, lparam) {
+                return LRESULT(0);
+            }
+            if msg == WM_ACTIVATE && wparam.0 & 0xFFFF != 0 {
+                super::wintab::activated();
+            }
+            if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE || msg == WM_POINTERUP {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
         }
-        // the window active again: its WinTab context goes on top
-        if msg == WM_ACTIVATE && wparam.0 & 0xFFFF != 0 {
-            super::wintab::activated();
+
+        // Physical mouse input detection: reset pen state if a real mouse is used
+        if msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN {
+            let extra = unsafe { GetMessageExtraInfo().0 as usize };
+            let is_pen_msg = (extra & 0xFFFFFF00) == 0xFF515700;
+            if !is_pen_msg && !super::is_use_wintab() && !super::is_pen_active() {
+                super::set_mouse_pen(None);
+            }
         }
-        let mut hovering = false;
+
+        if msg == WM_POINTERLEAVE || msg == WM_POINTERCAPTURECHANGED {
+            super::pen_gone();
+            super::set_pen_active(false);
+            if !super::is_use_wintab() {
+                super::set_mouse_pen(None);
+                super::queue_pen_event(super::PenEvent::Gone);
+                wake();
+            }
+        }
+
         if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE || msg == WM_POINTERUP {
-            // the pointer's id is the low word of `wparam`
             let id = (wparam.0 & 0xFFFF) as u32;
-            // a pen or a finger, as the system knows it (a touch screen's fingers may have a pressure)
+            let flags = (wparam.0 >> 16) as u32;
             let mut kind = POINTER_INPUT_TYPE::default();
-            // SAFETY: `kind` is a type to fill for this pointer
-            if unsafe { GetPointerType(id, &mut kind) }.is_ok() && (kind == PT_PEN || kind == PT_TOUCH) {
-                super::pointer_kind(u64::from(id), kind == PT_PEN);
-                // the system gives the pen itself (Windows Ink on): WinTab's packets wait
-                if kind == PT_PEN {
+            let _ = unsafe { GetPointerType(id, &mut kind) };
+
+            let mut info = POINTER_PEN_INFO::default();
+            let has_pen_info = unsafe { GetPointerPenInfo(id, &mut info) }.is_ok();
+            let is_pen = kind == PT_PEN || has_pen_info;
+
+            if is_pen {
+                super::pointer_kind(u64::from(id), true);
+                if !super::is_use_wintab() {
                     super::wintab::ink_pen();
                 }
-            }
-            frame_kinds(id);
-            if (wparam.0 >> 16) as u32 & POINTER_FLAG_CANCELED != 0 {
-                super::taken_back(u64::from(id));
-            }
-            if msg == WM_POINTERDOWN && kind == PT_PEN {
-                super::pen_on_screen(u64::from(id), pen_device(id) == Some(POINTER_DEVICE_TYPE_INTEGRATED_PEN));
-            }
-            // a pen held above the screen (not touching it)
-            let touching = (wparam.0 >> 16) & POINTER_FLAG_INCONTACT != 0;
-            hovering = msg == WM_POINTERUPDATE && kind == PT_PEN && !touching;
-            let mut info = POINTER_PEN_INFO::default();
-            // SAFETY: `info` is a pen info to fill; a pointer that isn't a pen fails and is left
-            if unsafe { GetPointerPenInfo(id, &mut info) }.is_ok() {
+                let touching = flags & POINTER_FLAG_INCONTACT != 0;
+                super::set_pen_active(touching && msg != WM_POINTERUP);
+
+                frame_kinds(id);
+                if flags & POINTER_FLAG_CANCELED != 0 {
+                    super::taken_back(u64::from(id));
+                }
+                if msg == WM_POINTERDOWN {
+                    super::pen_on_screen(u64::from(id), pen_device(id) == Some(POINTER_DEVICE_TYPE_INTEGRATED_PEN));
+                }
+
                 let tilted = info.penMask & (PEN_MASK_TILT_X | PEN_MASK_TILT_Y) != 0;
                 let lean = tilted.then(|| super::lean_of(info.tiltX as f32, info.tiltY as f32));
-                // degrees clockwise
                 let roll = (info.penMask & PEN_MASK_ROTATION != 0).then(|| (info.rotation as f32).to_radians());
                 super::keep_pose(u64::from(id), lean, roll);
                 super::pen_flags(u64::from(id), info.penFlags);
-                let pressed = info.penMask & PEN_MASK_PRESSURE != 0;
-                super::pen_pressure(u64::from(id), pressed.then(|| info.pressure as f32 / 1024.0));
+
+                // Dynamic max pressure calibration:
+                let raw_p = info.pressure;
+                if raw_p > MAX_PRESSURE.load(Ordering::Relaxed) {
+                    let new_max = if raw_p > 8192 {
+                        16384
+                    } else if raw_p > 4096 {
+                        8192
+                    } else if raw_p > 2048 {
+                        4096
+                    } else {
+                        2048
+                    };
+                    MAX_PRESSURE.store(new_max, Ordering::Relaxed);
+                }
+                let current_max = MAX_PRESSURE.load(Ordering::Relaxed).max(1024) as f32;
+                let norm_pressure = (raw_p as f32 / current_max).clamp(0.0, 1.0);
+
+                let active_pressure = if msg == WM_POINTERUP || !touching {
+                    0.0
+                } else if info.penMask & PEN_MASK_PRESSURE != 0 && raw_p > 0 {
+                    norm_pressure
+                } else if touching {
+                    0.02_f32.max(norm_pressure)
+                } else {
+                    0.0
+                };
+                super::pen_pressure(u64::from(id), touching.then_some(active_pressure));
+
+                let is_eraser = (info.penFlags & (PEN_FLAG_INVERTED | PEN_FLAG_ERASER)) != 0;
+                let mouse_pen = super::MousePen {
+                    pressure: active_pressure,
+                    eraser: is_eraser,
+                };
+                super::set_mouse_pen(Some((mouse_pen, lean)));
+
+                let mut client_pt = info.pointerInfo.ptPixelLocation;
+                let placed = unsafe { ScreenToClient(hwnd, &mut client_pt).as_bool() };
+                if placed {
+                    let pt_f32 = (client_pt.x as f32, client_pt.y as f32);
+                    super::keep_pen_position(pt_f32);
+                    super::keep_fine_mouse_pen_at(pt_f32, mouse_pen, Some(pt_f32));
+                }
+
+                // In Windows Ink mode: queue direct pen events!
+                if !super::is_use_wintab() && placed {
+                    let scale = super::window_scale();
+                    let x = client_pt.x as f64 / scale;
+                    let y = client_pt.y as f64 / scale;
+                    let pen_id = u64::from(id);
+
+                    let pen_event = match msg {
+                        WM_POINTERDOWN => super::PenEvent::Down { id: pen_id, x, y, pressure: active_pressure },
+                        WM_POINTERUPDATE if touching => super::PenEvent::Move { id: pen_id, x, y, pressure: active_pressure },
+                        WM_POINTERUPDATE => super::PenEvent::Hover { id: pen_id, x, y },
+                        WM_POINTERUP => super::PenEvent::Up { id: pen_id, x, y, pressure: 0.0 },
+                        _ => super::PenEvent::Hover { id: pen_id, x, y },
+                    };
+                    if super::queue_pen_event(pen_event) {
+                        wake();
+                    }
+                    return LRESULT(0);
+                }
+            } else if unsafe { GetPointerType(id, &mut kind) }.is_ok() && kind == PT_TOUCH {
+                super::pointer_kind(u64::from(id), false);
             }
         }
-        // a hovering pen's moves to the system's own handling, which makes them the mouse's, so the
-        // brush cursor follows it (winit would take them as touches moving that never began, and
-        // the cursor would stay where the mouse last was)
-        if hovering {
-            // SAFETY: the message as it came, to the system's default procedure
-            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
-        }
-        // SAFETY: the procedure winit set, as SetWindowLongPtrW gave it back
+
         let winit: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(WINIT.load(Ordering::Relaxed)) };
         unsafe { CallWindowProcW(winit, hwnd, msg, wparam, lparam) }
     }
@@ -1059,5 +1365,16 @@ mod tests {
         let (tilt, towards) = lean_of(each, each);
         assert!((tilt.to_degrees() - 45.0).abs() < 1e-3, "{tilt}");
         assert!((towards.to_degrees() - 135.0).abs() < 1e-3, "{towards}");
+    }
+
+    #[test]
+    fn pen_position_tracks_and_clears() {
+        clear_pen_position();
+        assert_eq!(pen_position(), None);
+        keep_pen_position((150.0, 250.0));
+        assert_eq!(pen_position(), Some((150.0, 250.0)));
+        assert!(is_pen_near());
+        clear_pen_position();
+        assert_eq!(pen_position(), None);
     }
 }

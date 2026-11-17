@@ -314,6 +314,13 @@ impl Hooks {
             && self.through(Hook::KeepClear, false, |running, said| Ok(said | running.keep_clear()?))
     }
 
+    /// The macOS top bar hook: whether to show macOS style traffic lights and title bar (not 0),
+    /// or default to the platform's standard window decorations.
+    pub(crate) fn macos_top_bar(&self) -> bool {
+        self.has(Hook::MacosTopBar)
+            && self.through(Hook::MacosTopBar, false, |running, said| Ok(said | running.macos_top_bar()?))
+    }
+
     /// The undo notice hook: whether undo and redo go by without the notice naming what they took
     /// back or brought back.
     pub(crate) fn hide_undo_notice(&self) -> bool {
@@ -2122,6 +2129,42 @@ pub(crate) mod tests {
         assert!(card(&plugins).problem.is_some());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn macos_top_bar_hook_answers_while_a_plugin_asks_for_it() {
+        let dir = store("macos-top-bar");
+        let module = wat::parse_str(
+            r#"(module
+                (global $on (mut i32) (i32.const 1))
+                (func (export "procraft_macos_top_bar") (result i32) (global.get $on))
+                (func (export "procraft_control") (param i32 f32)
+                    (if (f32.ge (local.get 1) (f32.const 0.5))
+                        (then (global.set $on (i32.const 1)))
+                        (else (global.set $on (i32.const 0))))))"#,
+        ).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["macos_top_bar"]);
+        manifest["controls"] = json!([
+            { "key": "enabled", "type": "switch", "label": "macOS style top bar", "starts": true }
+        ]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        // off by default when installed
+        assert!(!plugins.macos_top_bar());
+        // turn on the plugin
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert!(plugins.macos_top_bar());
+        // toggle switch off
+        assert!(plugins.set_switch(format!("{ID}.enabled"), false));
+        assert!(!plugins.macos_top_bar());
+        // toggle switch back on
+        assert!(plugins.set_switch(format!("{ID}.enabled"), true));
+        assert!(plugins.macos_top_bar());
+        // turn plugin off
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert!(!plugins.macos_top_bar());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

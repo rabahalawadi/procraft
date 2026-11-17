@@ -97,6 +97,7 @@ impl State {
         screen: Profile,
         started: Instant,
     ) {
+        self.ensure_shape_drawn();
         self.needs_frame = false;
         self.frame_due = None;
         // the view settling into place keeps drawing until it is there

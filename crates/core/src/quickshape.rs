@@ -104,6 +104,10 @@ pub(crate) struct ShapeEdit {
     held: Option<Held>,
     /// The stroke it was made of, for undo to go back to.
     stroke: Option<DrawnStroke>,
+    /// Precomputed ellipse frame for the stroke as drawn, so along_ellipse does not re-fit on every move.
+    fitted_ellipse: Option<(Vec2, Vec2, Vec2)>,
+    /// Precomputed sequence of angles along the fitted ellipse for the stroke as drawn.
+    ellipse_angles: Option<Vec<f32>>,
 }
 
 impl ShapeEdit {
@@ -116,6 +120,9 @@ impl ShapeEdit {
         stroke: Option<DrawnStroke>,
     ) -> ShapeEdit {
         let first = shape.clone();
+        let frame = |n: &[Vec2]| Some((*n.first()?, *n.get(1)? - *n.first()?, *n.get(2)? - *n.first()?));
+        let fitted_ellipse = frame(&fit_ellipse(&drawn).nodes);
+        let ellipse_angles = precompute_ellipse_angles(&drawn, fitted_ellipse);
         ShapeEdit {
             shape,
             first,
@@ -127,6 +134,8 @@ impl ShapeEdit {
             modes: Vec::new(),
             held,
             stroke,
+            fitted_ellipse,
+            ellipse_angles,
         }
     }
 
@@ -139,13 +148,15 @@ impl ShapeEdit {
     /// it was made of. An ellipse goes where the stroke went, each of its points taken onto it: a
     /// stroke that didn't close stays open there, as drawn, rather than meeting itself in a seam.
     pub(crate) fn samples(&self) -> Vec<Sample> {
+        let is_held = self.held.is_some();
         let outline = match self.shape.kind {
             ShapeKind::Ellipse | ShapeKind::Circle => {
-                along_ellipse(&self.shape.nodes, &self.drawn).unwrap_or_else(|| self.shape.outline())
+                along_ellipse(&self.shape.nodes, &self.drawn, self.fitted_ellipse, self.ellipse_angles.as_deref())
+                    .unwrap_or_else(|| self.shape.outline())
             }
             _ => self.shape.outline(),
         };
-        resample(&outline, &self.along)
+        resample(&outline, &self.along, is_held)
     }
 
     /// Its kind as a plugin is told it, and its nodes (canvas pixels).
@@ -291,6 +302,7 @@ impl State {
 
     /// The shape last kept, if it is the last thing done, gives way to the stroke it was made of.
     fn back_to_stroke(&mut self) -> bool {
+        self.ensure_shape_drawn();
         self.flush();
         let Some(mut kept) = self.kept_shape.take().filter(|kept| self.still_stands(kept)) else { return false };
         let Some(canvas) = self.canvas.as_mut() else { return false };
@@ -352,12 +364,27 @@ impl State {
         self.second = None;
     }
 
+    /// Draws the shape if its geometry changed since it was last drawn.
+    pub(crate) fn ensure_shape_drawn(&mut self) {
+        if self.shape_dirty {
+            self.draw_shape();
+            self.shape_dirty = false;
+        }
+    }
+
     /// The pen still down after a snap moved to `to` (canvas point): the shape turns and grows
     /// with it, about its start (open shapes) or centre (closed ones). Whether it changed.
     pub(crate) fn follow_shape(&mut self, to: Vec2) -> bool {
         let Some(held) = self.shape.as_mut().and_then(|e| e.held.as_mut()) else { return false };
+        if held.at.distance(to) < 0.5 {
+            return false;
+        }
         held.at = to;
-        self.reshape_held()
+        let changed = self.reshape_held();
+        if changed {
+            self.shape_dirty = true;
+        }
+        changed
     }
 
     /// Works the held shape out again from the shape as it snapped. Whether it changed.
@@ -373,14 +400,17 @@ impl State {
             return false;
         }
         edit.shape = shape;
-        self.draw_shape();
         true
     }
 
     /// The pen that drew the snapped shape lifted: it stays where it is, open to be edited.
     pub(crate) fn let_go_shape(&mut self) {
         if let Some(edit) = self.shape.as_mut() {
-            edit.held = None;
+            if edit.held.is_some() || self.shape_dirty {
+                edit.held = None;
+                self.draw_shape();
+                self.shape_dirty = false;
+            }
         }
     }
 
@@ -491,18 +521,57 @@ fn refresh_corners(shape: &mut Shape, modes: &[Anchor]) {
     }
 }
 
+fn precompute_ellipse_angles(drawn: &[Vec2], fitted: Option<(Vec2, Vec2, Vec2)>) -> Option<Vec<f32>> {
+    let frame = |n: &[Vec2]| Some((*n.first()?, *n.get(1)? - *n.first()?, *n.get(2)? - *n.first()?));
+    let (fc, fa, fb) = fitted.or_else(|| frame(&fit_ellipse(drawn).nodes))?;
+    let det = fa.x * fb.y - fa.y * fb.x;
+    if det.abs() < 1e-6 || drawn.len() < 2 {
+        return None;
+    }
+    let turn = |p: Vec2| {
+        let d = p - fc;
+        let (u, v) = ((d.x * fb.y - d.y * fb.x) / det, (fa.x * d.y - fa.y * d.x) / det);
+        v.atan2(u)
+    };
+    use std::f32::consts::{PI, TAU};
+    let step = TAU / ELLIPSE_STEPS;
+    let mut t = turn(*drawn.first()?);
+    let mut out = vec![t];
+    for p in drawn.iter().skip(1).filter(|p| p.is_finite()) {
+        let d = (turn(*p) - t + PI).rem_euclid(TAU) - PI;
+        let n = (d.abs() / step).ceil().max(1.0) as usize;
+        for k in 1..=n {
+            out.push(t + d * k as f32 / n as f32);
+        }
+        t += d;
+    }
+    Some(out)
+}
+
 /// The way along the ellipse `nodes` (its centre, then the ends of its two axes) that the stroke
 /// `drawn` went: each of its points taken onto the ellipse at the same turn about the centre in the
 /// ellipse's own frame, joined along the ellipse. A stroke that stopped short stays open, and one
 /// that ran on past its start lies over it, its end clear of the start's taper. The turns are those
 /// about the ellipse the stroke fitted, so a shape moved, turned or sized since goes as it did.
 /// None for a flat ellipse or no stroke.
-fn along_ellipse(nodes: &[Vec2], drawn: &[Vec2]) -> Option<Vec<Vec2>> {
+fn along_ellipse(
+    nodes: &[Vec2],
+    drawn: &[Vec2],
+    fitted: Option<(Vec2, Vec2, Vec2)>,
+    angles: Option<&[f32]>,
+) -> Option<Vec<Vec2>> {
     let frame = |n: &[Vec2]| Some((*n.first()?, *n.get(1)? - *n.first()?, *n.get(2)? - *n.first()?));
     let (c, a, b) = frame(nodes)?;
-    let (fc, fa, fb) = frame(&fit_ellipse(drawn).nodes)?;
+    if a.x * b.y - a.y * b.x == 0.0 {
+        return None;
+    }
+    let on = |t: f32| c + a * t.cos() + b * t.sin();
+    if let Some(angles) = angles {
+        return Some(angles.iter().map(|&t| on(t)).collect());
+    }
+    let (fc, fa, fb) = fitted.or_else(|| frame(&fit_ellipse(drawn).nodes))?;
     let det = fa.x * fb.y - fa.y * fb.x;
-    if det.abs() < 1e-6 || a.x * b.y - a.y * b.x == 0.0 || drawn.len() < 2 {
+    if det.abs() < 1e-6 || drawn.len() < 2 {
         return None;
     }
     // the turn of a point in the fitted ellipse's frame: (cos, sin) are its coordinates along the
@@ -512,7 +581,6 @@ fn along_ellipse(nodes: &[Vec2], drawn: &[Vec2]) -> Option<Vec<Vec2>> {
         let (u, v) = ((d.x * fb.y - d.y * fb.x) / det, (fa.x * d.y - fa.y * d.x) / det);
         v.atan2(u)
     };
-    let on = |t: f32| c + a * t.cos() + b * t.sin();
     use std::f32::consts::{PI, TAU};
     let step = TAU / ELLIPSE_STEPS;
     let mut t = turn(*drawn.first()?);
@@ -615,9 +683,10 @@ impl StrokeAlong {
     }
 }
 
-/// Points [`SAMPLE_STEP`] apart along `outline`, as stroke samples with the pen as it was at that
+/// Points along `outline`, as stroke samples with the pen as it was at that
 /// share of the way along its stroke, taking as long as it did there.
-fn resample(outline: &[Vec2], along: &StrokeAlong) -> Vec<Sample> {
+fn resample(outline: &[Vec2], along: &StrokeAlong, is_held: bool) -> Vec<Sample> {
+    let step_size = if is_held { 4.0 } else { SAMPLE_STEP };
     let Some(&first) = outline.first() else { return Vec::new() };
     let whole: f32 = outline.windows(2).filter_map(|w| Some(w.first()?.distance(*w.get(1)?))).sum();
     let plain = PenThere { way: 0.0, pressure: 1.0, tilt: 0.0, azimuth: 0.0, roll: 0.0, pace: SAMPLE_PACE };
@@ -627,7 +696,7 @@ fn resample(outline: &[Vec2], along: &StrokeAlong) -> Vec<Sample> {
     for w in outline.windows(2) {
         let [a, b] = w else { continue };
         let step = a.distance(*b);
-        let n = (step / SAMPLE_STEP).ceil().max(1.0) as usize;
+        let n = (step / step_size).ceil().max(1.0) as usize;
         for k in 1..=n {
             let part = k as f32 / n as f32;
             let pen = along.at((gone + step * part) / whole.max(1e-6), &mut from).unwrap_or(plain);
@@ -832,7 +901,7 @@ impl CanvasSession {
             edit.shape.move_handle(index, to);
         }
         refresh_corners(&mut edit.shape, &edit.modes);
-        st.draw_shape();
+        st.shape_dirty = true;
         self.shared.frame(st);
         st.shape_info()
     }
@@ -867,7 +936,7 @@ impl CanvasSession {
         }
         edit.shape.set_anchor(at, next);
         refresh_corners(&mut edit.shape, &edit.modes);
-        st.draw_shape();
+        st.shape_dirty = true;
         self.shared.frame(st);
         st.shape_info()
     }
@@ -919,7 +988,9 @@ impl CanvasSession {
     pub fn quickshape_unpin(&self) -> Option<QuickShapeInfo> {
         let mut guard = self.shared.lock();
         guard.let_go_shape();
-        guard.shape_info()
+        let st = &mut *guard;
+        self.shared.frame(st);
+        st.shape_info()
     }
 
     /// The edited shape dragged from window point (`fx`, `fy`) to (`tx`, `ty`): it moves along.
@@ -983,7 +1054,7 @@ mod tests {
         let mut sized = moved.clone();
         sized.move_handle(0, moved.nodes[0] + (moved.nodes[1] - moved.nodes[0]) * 2.0);
         for shape in [&mut moved, &mut sized] {
-            let way = along_ellipse(&shape.nodes, &drawn).unwrap();
+            let way = along_ellipse(&shape.nodes, &drawn, None, None).unwrap();
             let (first, last) = (way[0], way[way.len() - 1]);
             assert!(first.distance(last) < 1.0, "left open from {first:?} to {last:?}");
             let centre = shape.nodes[0];
@@ -998,12 +1069,12 @@ mod tests {
     fn an_ellipse_goes_as_far_round_as_its_stroke_did() {
         let short = positions(&circle(0.9, 8.0));
         let shape = fit_ellipse(&short);
-        let way = along_ellipse(&shape.nodes, &short).unwrap();
+        let way = along_ellipse(&shape.nodes, &short, None, None).unwrap();
         assert!(way[0].distance(way[way.len() - 1]) > 100.0, "a stroke that stopped short stays open");
         // run on past its start it lies over it, ending as far on as the stroke did
         let over = positions(&circle(1.1, 8.0));
         let shape = fit_ellipse(&over);
-        let way = along_ellipse(&shape.nodes, &over).unwrap();
+        let way = along_ellipse(&shape.nodes, &over, None, None).unwrap();
         let (start, end) = (way[0], way[way.len() - 1]);
         let (want, got) = (over[0].distance(over[over.len() - 1]), start.distance(end));
         assert!((want - got).abs() < 25.0, "ended {got} from its start, as drawn {want}");
@@ -1056,7 +1127,7 @@ mod tests {
         assert!((pace - 1.27).abs() < 0.05, "{pace}");
         // and the outline takes as long, the hold in its input or not
         let whole: Vec<Sample> = drawn.iter().chain(&held).copied().collect();
-        let outline = resample(&positions(&drawn), &StrokeAlong::of(&whole, pace));
+        let outline = resample(&positions(&drawn), &StrokeAlong::of(&whole, pace), false);
         let took = outline[outline.len() - 1].time_ms;
         assert!((took - 1000.0).abs() < 30.0, "{took}");
     }
@@ -1076,7 +1147,7 @@ mod tests {
             ..s
         });
         let shape: Vec<Vec2> = (0..=20).map(|i| Vec2::new(i as f32 * 5.0, 50.0)).collect();
-        let samples = resample(&shape, &StrokeAlong::of(&stroke, 5.0));
+        let samples = resample(&shape, &StrokeAlong::of(&stroke, 5.0), false);
         let (first, last) = (samples[0], samples[samples.len() - 1]);
         assert!((first.pressure - 0.2).abs() < 0.01 && (last.pressure - 1.0).abs() < 0.01, "{first:?} {last:?}");
         assert!((first.tilt - 0.0).abs() < 0.01 && (last.tilt - 1.0).abs() < 0.01, "{first:?} {last:?}");
@@ -1093,7 +1164,7 @@ mod tests {
         let times = |i: usize| if i <= 5 { i as f64 * 40.0 } else { 200.0 + (i - 5) as f64 * 10.0 };
         let stroke = straight(|i, s| Sample { time_ms: times(i), ..s });
         let shape: Vec<Vec2> = (0..=500).map(|i| Vec2::new(i as f32 * 2.0, 0.0)).collect();
-        let samples = resample(&shape, &StrokeAlong::of(&stroke, 4.0));
+        let samples = resample(&shape, &StrokeAlong::of(&stroke, 4.0), false);
         let half = samples[samples.len() / 2].time_ms;
         let end = samples[samples.len() - 1].time_ms;
         assert!(half > 3.0 * (end - half), "{half} of {end}");
@@ -1102,7 +1173,7 @@ mod tests {
             let pos = if i == 6 { Vec2::new(500.6, 0.0) } else { s.pos };
             Sample { pos, time_ms: if i >= 6 { s.time_ms + 900.0 } else { s.time_ms }, ..s }
         });
-        let samples = resample(&shape, &StrokeAlong::of(&stroke, 5.0));
+        let samples = resample(&shape, &StrokeAlong::of(&stroke, 5.0), false);
         let longest = samples.windows(2).map(|w| w[1].time_ms - w[0].time_ms).fold(0.0f64, f64::max);
         assert!(longest <= 2.0 / (5.0 / f64::from(PACE_MOST_OFF)) + 0.1, "{longest}");
     }

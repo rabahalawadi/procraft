@@ -474,7 +474,8 @@ impl Gallery {
             .show(ctx, |ui| {
                 ui.multiply_opacity(alpha);
                 ui.allocate_rect(screen, Sense::hover());
-                ui.painter().rect_filled(screen, 0, argb(BACKGROUND));
+                let corner = if crate::window_controls::is_macos_topbar() { 12.0 } else { 0.0 };
+                ui.painter().rect_filled(screen, corner, argb(BACKGROUND));
                 let tapped = self.header(ui, look, screen);
                 let grid = Rect::from_min_max(pos2(screen.left(), screen.top() + HEADER), screen.max);
                 let asked = if self.entries.is_empty() {
@@ -656,10 +657,18 @@ impl Gallery {
     fn select_header(&mut self, ui: &Ui, look: &mut Look, screen: Rect) {
         let painter = ui.painter();
         let top = screen.top();
+        let macos = crate::window_controls::is_macos_topbar();
+        let dots_hovered = if macos {
+            let cy = top + 27.5;
+            crate::window_controls::traffic_lights(ui, screen.left() + 16.0, cy)
+        } else {
+            false
+        };
+        let title_x = if macos { screen.left() + 84.0 } else { screen.left() + 32.0 };
         let title = self.stack.as_ref().map_or("ProCraft", |s| s.1.as_str()).to_owned();
         text(
             painter,
-            pos2(screen.left() + 32.0, top + 11.0),
+            pos2(title_x, top + 11.0),
             Align2::LEFT_TOP,
             &title,
             36.0,
@@ -708,6 +717,25 @@ impl Gallery {
         }
         if let Some(action) = chosen {
             self.act(action);
+        }
+
+        if macos {
+            let header_rect = Rect::from_min_max(screen.min, pos2(screen.right(), top + HEADER));
+            let over_element = dots_hovered
+                || ui.input(|i| {
+                    i.pointer.hover_pos().is_some_and(|p| {
+                        capsule.expand(4.0).contains(p) || done.expand(4.0).contains(p)
+                    })
+                });
+            if !over_element {
+                let res = ui.interact(header_rect, ui.scope_id().with("select_header_drag"), Sense::click_and_drag());
+                if res.drag_started_by(egui::PointerButton::Primary) {
+                    crate::window_controls::request_drag();
+                }
+                if res.double_clicked() {
+                    crate::window_controls::request_maximize();
+                }
+            }
         }
     }
 
@@ -1112,8 +1140,18 @@ impl Gallery {
         }
         let painter = ui.painter();
         let top = screen.top();
+        let macos = crate::window_controls::is_macos_topbar();
+        let dots_hovered = if macos {
+            let cy = top + 27.5;
+            crate::window_controls::traffic_lights(ui, screen.left() + 16.0, cy)
+        } else {
+            false
+        };
+        let back_x = if macos { screen.left() + 84.0 } else { screen.left() + 20.0 };
+        let title_x = if macos { screen.left() + 84.0 } else { screen.left() + 32.0 };
+
         if let Some((_, name)) = self.stack.clone() {
-            let row = Rect::from_min_size(pos2(screen.left() + 20.0, top + 12.0), vec2(40.0, 41.0));
+            let row = Rect::from_min_size(pos2(back_x, top + 12.0), vec2(40.0, 41.0));
             self.back = row.union(row.translate(vec2(300.0, 0.0)));
             let response = ui.interact(self.back, ui.scope_id().with("back"), Sense::click());
             // blue while touched, or while something dragged is over it, to take it out
@@ -1139,13 +1177,13 @@ impl Gallery {
                 && *t < NAME_OUT_S
             {
                 let ink = argb(TITLE).gamma_multiply(1.0 - ease(t / NAME_OUT_S));
-                let row = Rect::from_min_size(pos2(screen.left() + 20.0, top + 12.0), vec2(40.0, 41.0));
+                let row = Rect::from_min_size(pos2(back_x, top + 12.0), vec2(40.0, 41.0));
                 look.icon(ui, &icons::CHEVRON_LEFT, row.center(), 28.0, ink);
                 text(painter, pos2(row.right(), row.center().y), Align2::LEFT_CENTER, name, 36.0, Weight::Bold, ink);
             }
             let name = text(
                 painter,
-                pos2(screen.left() + 32.0, top + 11.0),
+                pos2(title_x, top + 11.0),
                 Align2::LEFT_TOP,
                 "ProCraft",
                 36.0,
@@ -1188,6 +1226,28 @@ impl Gallery {
         if ui.interact(plus, ui.scope_id().with("new canvas"), Sense::click()).clicked() {
             self.new_open = !self.new_open;
         }
+
+        if macos {
+            let header_rect = Rect::from_min_max(screen.min, pos2(screen.right(), top + HEADER));
+            let over_element = dots_hovered
+                || ui.input(|i| {
+                    i.pointer.hover_pos().is_some_and(|p| {
+                        capsule.expand(4.0).contains(p)
+                            || plus.expand(4.0).contains(p)
+                            || (self.stack.is_some() && self.back.expand(4.0).contains(p))
+                    })
+                });
+            if !over_element {
+                let res = ui.interact(header_rect, ui.scope_id().with("gallery_header_drag"), Sense::click_and_drag());
+                if res.drag_started_by(egui::PointerButton::Primary) {
+                    crate::window_controls::request_drag();
+                }
+                if res.double_clicked() {
+                    crate::window_controls::request_maximize();
+                }
+            }
+        }
+
         asked
     }
 

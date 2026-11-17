@@ -65,38 +65,63 @@ pub fn show_in(
         ui.allocate_rect(band, Sense::click());
         let painter = ui.painter();
         painter.rect_filled(band, 0, argb(colours.band));
-        text(painter, band.min + vec2(32.0, 27.0), Align2::LEFT_TOP, title, 22.0, Weight::Bold, argb(LABEL));
+        let macos = crate::window_controls::is_macos_topbar();
+        let dots_hovered = if macos {
+            let cy = band.top() + 38.0;
+            crate::window_controls::traffic_lights(ui, band.left() + 16.0, cy)
+        } else {
+            false
+        };
+        let title_x = if macos { 84.0 } else { 32.0 };
+        text(painter, band.min + vec2(title_x, 27.0), Align2::LEFT_TOP, title, 22.0, Weight::Bold, argb(LABEL));
         let done = Rect::from_min_size(pos2(band.right() - 20.0 - 44.0, band.top() + 20.0), vec2(44.0, 44.0));
         painter.circle_filled(done.center(), 22.0, argb(DONE));
         look.icon(ui, &icons::DONE_TICK, done.center(), 40.0, Color32::WHITE);
         if ui.interact(done, ui.scope_id().with("done"), Sense::click()).clicked() {
             tapped = Some(Tapped::Done);
         }
-        if buttons.is_empty() {
-            return;
+
+        let mut over_capsule = false;
+        if !buttons.is_empty() {
+            let galleys: Vec<_> = buttons
+                .iter()
+                .map(|(label, chosen)| {
+                    let ink = if *chosen { argb(CHOSEN) } else { argb(BUTTON) };
+                    ui.painter().layout_no_wrap((*label).to_owned(), Weight::Regular.font(17.0), ink)
+                })
+                .collect();
+            let width: f32 = galleys.iter().map(|g| g.size().x + 26.0).sum();
+            let capsule = Rect::from_min_size(pos2(done.left() - 13.0 - width, band.top() + 20.0), vec2(width, 43.0));
+            over_capsule = ui.input(|i| i.pointer.hover_pos().is_some_and(|p| capsule.expand(4.0).contains(p)));
+            ui.painter().rect_filled(capsule, 21.5, argb(colours.capsule));
+            ui.painter().rect_stroke(capsule, 21.5, Stroke::new(1.0, argb(colours.edge)), egui::StrokeKind::Inside);
+            let mut x = capsule.left();
+            for (i, ((_, chosen), galley)) in buttons.iter().zip(galleys).enumerate() {
+                let button = Rect::from_min_size(pos2(x, capsule.top()), vec2(galley.size().x + 26.0, 43.0));
+                if *chosen {
+                    ui.painter().rect_filled(button, 21.5, argb(CHOSEN_FILL));
+                }
+                ui.painter().galley(button.center() - galley.size() / 2.0, galley.clone(), Color32::WHITE);
+                if ui.interact(button, ui.scope_id().with(("tool button", i)), Sense::click()).clicked() {
+                    tapped = Some(Tapped::Button(i));
+                }
+                x = button.right();
+            }
         }
-        let galleys: Vec<_> = buttons
-            .iter()
-            .map(|(label, chosen)| {
-                let ink = if *chosen { argb(CHOSEN) } else { argb(BUTTON) };
-                ui.painter().layout_no_wrap((*label).to_owned(), Weight::Regular.font(17.0), ink)
-            })
-            .collect();
-        let width: f32 = galleys.iter().map(|g| g.size().x + 26.0).sum();
-        let capsule = Rect::from_min_size(pos2(done.left() - 13.0 - width, band.top() + 20.0), vec2(width, 43.0));
-        ui.painter().rect_filled(capsule, 21.5, argb(colours.capsule));
-        ui.painter().rect_stroke(capsule, 21.5, Stroke::new(1.0, argb(colours.edge)), egui::StrokeKind::Inside);
-        let mut x = capsule.left();
-        for (i, ((_, chosen), galley)) in buttons.iter().zip(galleys).enumerate() {
-            let button = Rect::from_min_size(pos2(x, capsule.top()), vec2(galley.size().x + 26.0, 43.0));
-            if *chosen {
-                ui.painter().rect_filled(button, 21.5, argb(CHOSEN_FILL));
+
+        if macos {
+            let over_element = dots_hovered
+                || over_capsule
+                || ui.input(|i| i.pointer.hover_pos().is_some_and(|p| done.expand(4.0).contains(p)));
+            if !over_element {
+                let res = ui.interact(band, ui.scope_id().with("tool_header_drag"), Sense::click_and_drag());
+                if res.drag_started_by(egui::PointerButton::Primary) {
+                    crate::window_controls::request_drag();
+                }
+                if res.double_clicked() {
+                    crate::window_controls::request_maximize();
+                }
             }
-            ui.painter().galley(button.center() - galley.size() / 2.0, galley.clone(), Color32::WHITE);
-            if ui.interact(button, ui.scope_id().with(("tool button", i)), Sense::click()).clicked() {
-                tapped = Some(Tapped::Button(i));
-            }
-            x = button.right();
         }
     });
     tapped

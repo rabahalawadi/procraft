@@ -67,6 +67,7 @@ pub enum Action {
     Export(Format, u8),
     /// The file a plugin makes of the artwork's layers (by its place among those offered).
     PluginExport(u8),
+    ToggleFullscreen,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -208,7 +209,7 @@ pub struct Interface {
     brushes_were_open: bool,
     /// The Prefs tab's settings (kept between runs), whether the side bar shows, and the licences
     /// while they show.
-    prefs: crate::prefs::Prefs,
+    pub prefs: crate::prefs::Prefs,
     side_bar_shown: bool,
     licences: bool,
     /// The keyboard shortcuts' list, from Help or while Ctrl (⌘) is held.
@@ -744,7 +745,8 @@ impl Interface {
         // the bars are glass over the canvas: the top bar's frost, the side bar's and its tracks'
         let (mut backdrops, mut windows) = (Vec::new(), Vec::new());
         let top_bar = ctx.content_rect().with_max_y(ctx.content_rect().top() + crate::look::pc::BAR_HEIGHT);
-        crate::chrome::frost(&mut backdrops, top_bar, 0.0, ctx.pixels_per_point());
+        let corner = if crate::window_controls::is_macos_topbar() { 12.0 } else { 0.0 };
+        crate::chrome::frost(&mut backdrops, top_bar, corner, ctx.pixels_per_point());
         // a mode taking the screen puts the side bar away
         let adjusting = session.adjustment_shown();
         let side_bar = self.side_bar_shown
@@ -1163,13 +1165,18 @@ impl Interface {
             return;
         }
         if !input.idle() {
-            if painting
-                && input.pressing()
-                && let Some(at) = ctx.pointer_latest_pos().filter(|at| on_canvas(*at))
-            {
-                ctx.set_cursor_icon(egui::CursorIcon::None);
-                if input.pressing_from_afar() && !self.overlays.outline_shown() && self.overlays.picking.is_none() {
-                    hover_cross(ctx, at);
+            if painting && input.pressing() {
+                let ppp = ctx.pixels_per_point();
+                let at = input
+                    .cursor()
+                    .map(|(x, y)| egui::pos2(x, y) / ppp)
+                    .or_else(|| ctx.pointer_latest_pos())
+                    .filter(|at| on_canvas(*at));
+                if let Some(at) = at {
+                    ctx.set_cursor_icon(egui::CursorIcon::None);
+                    if input.pressing_from_afar() && !self.overlays.outline_shown() && self.overlays.picking.is_none() {
+                        hover_cross(ctx, at);
+                    }
                 }
             }
             return;
@@ -1177,11 +1184,18 @@ impl Interface {
         // the outline or the cross follows the pointer, so its moves draw a frame
         input.hover_shown = painting;
         let ppp = ctx.pixels_per_point();
-        let at = input.hovering().filter(|_| painting).map(|(x, y)| egui::pos2(x, y) / ppp).filter(|at| on_canvas(*at));
+        let at = input
+            .hovering()
+            .map(|(x, y)| egui::pos2(x, y) / ppp)
+            .or_else(|| ctx.pointer_latest_pos().filter(|_| input.inside() && input.idle() && !input.moving_view()))
+            .filter(|_| painting)
+            .filter(|at| on_canvas(*at));
         self.overlays.hover(session, info, ppp, at.filter(|_| self.prefs.cursor_shown(true)));
-        if let Some(at) = at.filter(|_| !self.overlays.outline_shown()) {
+        if let Some(at) = at {
             ctx.set_cursor_icon(egui::CursorIcon::None);
-            hover_cross(ctx, at);
+            if !self.overlays.outline_shown() {
+                hover_cross(ctx, at);
+            }
         }
     }
 
@@ -2583,6 +2597,7 @@ impl Interface {
                     Some(Act::CopyCanvas) => self.copy_canvas(session),
                     Some(Act::Paste) => self.paste(ctx, false),
                     Some(Act::PastePrivate) => self.paste(ctx, true),
+                    Some(Act::ToggleFullscreen) => self.actions.push(Action::ToggleFullscreen),
                     // the panel does these itself
                     Some(
                         Act::Page(_)
@@ -2592,7 +2607,9 @@ impl Interface {
                         | Act::RightHanded
                         | Act::BrushCursor
                         | Act::ProjectCanvas
-                        | Act::ResetInput,
+                        | Act::ResetInput
+                        | Act::ToggleTabletApi
+                        | Act::ToggleExclusiveFullscreen,
                     )
                     | None => {}
                 }
