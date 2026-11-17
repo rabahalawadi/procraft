@@ -1809,6 +1809,10 @@ impl Interface {
     fn run_plugin_action(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, key: String) {
         // (what it may paint on, it checks: not a locked layer)
         self.open = None;
+        if key == "toggle" || key.ends_with(".toggle") || key.ends_with(".toggle_fullscreen") {
+            crate::window_controls::request_toggle_fullscreen();
+            return;
+        }
         let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
         std::thread::spawn(move || {
             plugins.run_action(key, session);

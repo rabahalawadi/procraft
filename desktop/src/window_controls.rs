@@ -23,6 +23,7 @@ pub enum WindowControlAction {
     Minimize,
     Maximize,
     Drag,
+    ToggleFullscreen,
 }
 
 static PENDING_ACTION: AtomicU8 = AtomicU8::new(0);
@@ -31,6 +32,7 @@ const ACT_CLOSE: u8 = 1;
 const ACT_MINIMIZE: u8 = 2;
 const ACT_MAXIMIZE: u8 = 3;
 const ACT_DRAG: u8 = 4;
+const ACT_TOGGLE_FULLSCREEN: u8 = 5;
 
 /// Retrieves and clears any pending window action.
 pub fn take_pending_action() -> Option<WindowControlAction> {
@@ -39,6 +41,7 @@ pub fn take_pending_action() -> Option<WindowControlAction> {
         ACT_MINIMIZE => Some(WindowControlAction::Minimize),
         ACT_MAXIMIZE => Some(WindowControlAction::Maximize),
         ACT_DRAG => Some(WindowControlAction::Drag),
+        ACT_TOGGLE_FULLSCREEN => Some(WindowControlAction::ToggleFullscreen),
         _ => None,
     }
 }
@@ -57,6 +60,10 @@ pub fn request_maximize() {
 
 pub fn request_drag() {
     PENDING_ACTION.store(ACT_DRAG, Ordering::Relaxed);
+}
+
+pub fn request_toggle_fullscreen() {
+    PENDING_ACTION.store(ACT_TOGGLE_FULLSCREEN, Ordering::Relaxed);
 }
 
 pub const DOT_RADIUS: f32 = 6.0;

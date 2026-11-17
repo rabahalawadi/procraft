@@ -499,7 +499,19 @@ impl ApplicationHandler for App {
             let is_alt_enter = (self.modifiers.state().alt_key() || screen.egui.egui_ctx().input(|i| i.modifiers.alt))
                 && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter);
             if is_f11 || is_alt_enter {
-                toggle_fullscreen_window(screen, self.ui.prefs.exclusive_fullscreen);
+                let allow = if self.ui.plugins().fullscreen_active() {
+                    self.ui.plugins().fullscreen_shortcuts()
+                } else {
+                    true
+                };
+                if allow {
+                    let exclusive = if self.ui.plugins().fullscreen_active() {
+                        self.ui.plugins().exclusive_fullscreen()
+                    } else {
+                        self.ui.prefs.exclusive_fullscreen
+                    };
+                    toggle_fullscreen_window(screen, exclusive);
+                }
             }
         }
         match event {
@@ -791,13 +803,21 @@ impl App {
                         let _ = screen.window.drag_window();
                     }
                 }
+                window_controls::WindowControlAction::ToggleFullscreen => {
+                    self.toggle_fullscreen();
+                }
             }
         }
     }
 
     fn toggle_fullscreen(&mut self) {
         if let Some(screen) = self.screen.as_mut() {
-            toggle_fullscreen_window(screen, self.ui.prefs.exclusive_fullscreen);
+            let exclusive = if self.ui.plugins().fullscreen_active() {
+                self.ui.plugins().exclusive_fullscreen()
+            } else {
+                self.ui.prefs.exclusive_fullscreen
+            };
+            toggle_fullscreen_window(screen, exclusive);
         }
     }
 

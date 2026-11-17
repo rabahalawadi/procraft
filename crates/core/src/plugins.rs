@@ -1560,6 +1560,21 @@ impl Plugins {
         self.hooks().macos_top_bar()
     }
 
+    /// Whether an enabled plugin asks for fullscreen mode features.
+    pub fn fullscreen_active(&self) -> bool {
+        self.hooks().fullscreen()
+    }
+
+    /// Whether the fullscreen plugin has exclusive fullscreen enabled.
+    pub fn exclusive_fullscreen(&self) -> bool {
+        self.hooks().exclusive_fullscreen()
+    }
+
+    /// Whether the fullscreen plugin enables keyboard shortcuts.
+    pub fn fullscreen_shortcuts(&self) -> bool {
+        self.hooks().fullscreen_shortcuts()
+    }
+
     /// Whether a plugin draws in-betweens: Animation Assist's frame options then offer In-between
     /// ([`crate::CanvasSession::add_inbetween`]).
     pub fn tweens(&self) -> bool {

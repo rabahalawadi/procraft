@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.fullscreen",
+  "name": "Fullscreen",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "Custom Plugins" },
+  "description": "Fullscreen display mode for ProCraft: toggle between windowed and fullscreen display, choose between exclusive (highest refresh rate) or borderless window, and use F11 or Alt+Enter shortcuts.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["fullscreen"],
+  "controls": [
+    { "key": "enabled", "type": "switch", "label": "Enable fullscreen features", "starts": true },
+    { "key": "exclusive", "type": "switch", "label": "Exclusive fullscreen (max refresh rate)", "starts": true, "under": "enabled" },
+    { "key": "shortcuts", "type": "switch", "label": "Keyboard shortcuts (F11 / Alt+Enter)", "starts": true, "under": "enabled" }
+  ],
+  "actions": [
+    { "key": "toggle", "label": "Toggle Fullscreen" }
+  ]
+}
