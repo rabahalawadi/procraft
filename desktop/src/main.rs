@@ -282,6 +282,8 @@ fn main() {
         close_requested: false,
         closed: false,
         modifiers: winit::event::Modifiers::default(),
+        alt_held: false,
+        was_maximized: false,
         macos_top_bar: false,
     };
     // a panic on the window's thread ends the app: said, rather than the window just vanishing
@@ -355,6 +357,10 @@ struct App {
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
     closed: bool,
     modifiers: winit::event::Modifiers,
+    /// Whether an Alt key is currently pressed (for Alt+Enter shortcut).
+    alt_held: bool,
+    /// Whether the window was maximized before entering fullscreen.
+    was_maximized: bool,
     /// Whether macOS top bar styling and controls are active.
     macos_top_bar: bool,
 }
@@ -487,31 +493,40 @@ impl ApplicationHandler for App {
         if response.repaint && event != WindowEvent::RedrawRequested {
             redraw_paced(&screen.window, self.last_frame, self.gap, &mut self.input_frame);
         }
+        if let WindowEvent::Focused(false) = &event {
+            self.alt_held = false;
+        }
         if let WindowEvent::ModifiersChanged(m) = &event {
             self.modifiers = *m;
         }
-        // F11 / Alt+Enter: the window fills its screen (exclusive or borderless fullscreen), or goes back to a window
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event {
+            if key.physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::AltLeft)
+                || key.physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::AltRight)
+            {
+                self.alt_held = key.state.is_pressed();
+            }
+        }
+        // F11 / Alt+Enter: the window fills its screen, or goes back to a window (active ONLY when fullscreen plugin is enabled)
         if let WindowEvent::KeyboardInput { event: key, .. } = &event
             && key.state.is_pressed()
             && !key.repeat
         {
-            let is_f11 = key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11);
-            let is_alt_enter = (self.modifiers.state().alt_key() || screen.egui.egui_ctx().input(|i| i.modifiers.alt))
-                && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter);
-            if is_f11 || is_alt_enter {
-                let allow = if self.ui.plugins().fullscreen_active() {
-                    self.ui.plugins().fullscreen_shortcuts()
-                } else {
-                    true
-                };
-                if allow {
-                    let exclusive = if self.ui.plugins().fullscreen_active() {
-                        self.ui.plugins().exclusive_fullscreen()
-                    } else {
-                        self.ui.prefs.exclusive_fullscreen
-                    };
-                    toggle_fullscreen_window(screen, exclusive);
-                }
+            let is_f11 = key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11)
+                || key.physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F11);
+            let is_enter = key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter)
+                || key.physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Enter)
+                || key.physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::NumpadEnter);
+            let alt_down = self.alt_held
+                || self.modifiers.state().alt_key()
+                || screen.egui.egui_ctx().input(|i| i.modifiers.alt);
+            let is_alt_enter = alt_down && is_enter;
+
+            if (is_f11 || is_alt_enter)
+                && self.ui.plugins().fullscreen_active()
+                && self.ui.plugins().fullscreen_shortcuts()
+            {
+                self.toggle_fullscreen();
+                return;
             }
         }
         match event {
@@ -685,11 +700,23 @@ impl ApplicationHandler for App {
     }
 }
 
-fn toggle_fullscreen_window(screen: &mut Screen, exclusive: bool) {
+fn toggle_fullscreen_window(screen: &mut Screen, exclusive: bool, was_maximized: &mut bool) {
     if screen.window.fullscreen().is_some() {
+        crate::pen::configure_fullscreen_window(&screen.window, false);
         screen.window.set_fullscreen(None);
+        if *was_maximized {
+            screen.window.set_maximized(true);
+        }
+        screen.window.request_redraw();
         return;
     }
+
+    *was_maximized = screen.window.is_maximized();
+    if *was_maximized {
+        screen.window.set_maximized(false);
+    }
+    crate::pen::configure_fullscreen_window(&screen.window, true);
+
     let monitor = screen.window.current_monitor().or_else(|| screen.window.primary_monitor());
     if exclusive {
         if let Some(ref m) = monitor {
@@ -700,11 +727,17 @@ fn toggle_fullscreen_window(screen: &mut Screen, exclusive: bool) {
                 .max_by_key(|vm| vm.refresh_rate_millihertz());
             if let Some(mode) = best_mode {
                 screen.window.set_fullscreen(Some(winit::window::Fullscreen::Exclusive(mode)));
-                return;
+                if screen.window.fullscreen().is_some() {
+                    screen.window.request_redraw();
+                    return;
+                }
             }
         }
     }
-    screen.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+
+    screen.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(monitor)));
+    crate::pen::configure_fullscreen_window(&screen.window, true);
+    screen.window.request_redraw();
 }
 
 impl App {
@@ -812,12 +845,18 @@ impl App {
 
     fn toggle_fullscreen(&mut self) {
         if let Some(screen) = self.screen.as_mut() {
-            let exclusive = if self.ui.plugins().fullscreen_active() {
-                self.ui.plugins().exclusive_fullscreen()
-            } else {
-                self.ui.prefs.exclusive_fullscreen
-            };
-            toggle_fullscreen_window(screen, exclusive);
+            if self.ui.plugins().fullscreen_active() {
+                let exclusive = self.ui.plugins().exclusive_fullscreen();
+                toggle_fullscreen_window(screen, exclusive, &mut self.was_maximized);
+                let size = screen.window.inner_size();
+                if !screen.minimised() {
+                    screen.resize(size.width, size.height);
+                    if let Some(session) = &self.session {
+                        session.resize_window(size.width, size.height);
+                    }
+                }
+                screen.window.request_redraw();
+            }
         }
     }
 
@@ -838,6 +877,10 @@ impl App {
         self.artwork_read();
         self.photo_read();
         let Some(screen) = self.screen.as_mut() else { return };
+        let size = screen.window.inner_size();
+        if let Some(session) = &self.session {
+            session.resize_window(size.width, size.height);
+        }
         let Some(session) = self.session.clone() else {
             self.gallery_frame();
             return;
@@ -1540,10 +1583,6 @@ impl App {
                 if let Some(export) = session.plugin_exports().into_iter().nth(usize::from(i)) {
                     files::export_plugin(session, &export.key, &mut self.ui.export_card);
                 }
-                None
-            }
-            Action::ToggleFullscreen => {
-                self.toggle_fullscreen();
                 None
             }
         };

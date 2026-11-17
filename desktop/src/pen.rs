@@ -799,13 +799,21 @@ mod tablet {
     }
 }
 
+#[cfg(windows)]
+pub fn configure_fullscreen_window(window: &winit::window::Window, fullscreen: bool) {
+    system::configure_fullscreen_window(window, fullscreen);
+}
+
+#[cfg(not(windows))]
+pub fn configure_fullscreen_window(_window: &winit::window::Window, _fullscreen: bool) {}
+
 /// The window's own procedure, put in front of winit's: unsafe as the system's calls are.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod system {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::ScreenToClient;
@@ -835,6 +843,75 @@ mod system {
 
     /// winit's procedure for the window, called after ours.
     static WINIT: AtomicIsize = AtomicIsize::new(0);
+
+    /// Whether the window is currently in fullscreen mode.
+    static IS_FULLSCREEN: AtomicBool = AtomicBool::new(false);
+
+    pub fn configure_fullscreen_window(window: &winit::window::Window, fullscreen: bool) {
+        IS_FULLSCREEN.store(fullscreen, Ordering::Relaxed);
+        let Ok(handle) = window.window_handle() else { return };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else { return };
+        let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
+        unsafe {
+            if fullscreen {
+                use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, HWND_TOP,
+                    SWP_FRAMECHANGED, SWP_NOZORDER, SWP_SHOWWINDOW,
+                    WS_CAPTION, WS_MAXIMIZE, WS_THICKFRAME,
+                };
+
+                let style = GetWindowLongW(hwnd, GWL_STYLE);
+                let borderless = style & !(WS_CAPTION.0 as i32 | WS_THICKFRAME.0 as i32 | WS_MAXIMIZE.0 as i32);
+                SetWindowLongW(hwnd, GWL_STYLE, borderless);
+
+                let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetMonitorInfoW(hmonitor, &mut mi).as_bool() {
+                    let x = mi.rcMonitor.left;
+                    let y = mi.rcMonitor.top;
+                    let w = mi.rcMonitor.right - mi.rcMonitor.left;
+                    let h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        x,
+                        y,
+                        w,
+                        h,
+                        SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW,
+                    );
+                }
+            } else {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, HWND_NOTOPMOST,
+                    SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                    WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+                };
+
+                let style = GetWindowLongW(hwnd, GWL_STYLE);
+                let normal_style = style
+                    | WS_CAPTION.0 as i32
+                    | WS_THICKFRAME.0 as i32
+                    | WS_SYSMENU.0 as i32
+                    | WS_MINIMIZEBOX.0 as i32
+                    | WS_MAXIMIZEBOX.0 as i32;
+                SetWindowLongW(hwnd, GWL_STYLE, normal_style);
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_NOTOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                );
+            }
+        }
+    }
 
     /// Event loop wake proxy to deliver pen events immediately.
     static WAKE: Mutex<Option<winit::event_loop::EventLoopProxy<()>>> = Mutex::new(None);
@@ -996,8 +1073,35 @@ mod system {
     /// A pen's pointer message: its pressure, tilt and coordinates captured with zero lag,
     /// feeding both the direct pointer channel and the mouse pen channel.
     unsafe extern "system" fn pointer_messages(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if msg == windows::Win32::UI::WindowsAndMessaging::WM_GETMINMAXINFO && IS_FULLSCREEN.load(Ordering::Relaxed) {
+            use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+            use windows::Win32::UI::WindowsAndMessaging::MINMAXINFO;
+
+            let mmi = lparam.0 as *mut MINMAXINFO;
+            if !mmi.is_null() {
+                unsafe {
+                    let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                    let mut mi = MONITORINFO {
+                        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                        ..Default::default()
+                    };
+                    if GetMonitorInfoW(hmonitor, &mut mi).as_bool() {
+                        let w = mi.rcMonitor.right - mi.rcMonitor.left;
+                        let h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                        (*mmi).ptMaxPosition.x = mi.rcMonitor.left;
+                        (*mmi).ptMaxPosition.y = mi.rcMonitor.top;
+                        (*mmi).ptMaxSize.x = w;
+                        (*mmi).ptMaxSize.y = h;
+                        (*mmi).ptMaxTrackSize.x = w;
+                        (*mmi).ptMaxTrackSize.y = h;
+                        return LRESULT(0);
+                    }
+                }
+            }
+        }
+
         // For custom undecorated windows (macOS-style titlebar), provide native border resize hit-testing
-        if msg == WM_NCHITTEST && unsafe { !IsZoomed(hwnd).as_bool() } {
+        if msg == WM_NCHITTEST && !IS_FULLSCREEN.load(Ordering::Relaxed) && unsafe { !IsZoomed(hwnd).as_bool() } {
             let mut rect = RECT::default();
             if unsafe { GetWindowRect(hwnd, &mut rect).is_ok() } {
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;

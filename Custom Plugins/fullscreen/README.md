@@ -1,6 +1,8 @@
 # Fullscreen Plugin for ProCraft
+**Author**: raba7  
+**Description**: Immersive fullscreen canvas mode for ProCraft by raba7. Seamlessly switch between windowed and fullscreen display with F11 or Alt+Enter, featuring optional high-refresh rate exclusive fullscreen.
 
-This plugin adds complete fullscreen management and toggling capabilities to ProCraft.
+---
 
 ## Features
 - **Fullscreen Mode Toggle**:

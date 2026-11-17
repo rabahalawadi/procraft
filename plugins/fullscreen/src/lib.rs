@@ -5,9 +5,9 @@
 
 /// Controls:
 /// 0: enabled (switch, default on)
-/// 1: exclusive (switch, default on)
+/// 1: exclusive (switch, default off -> borderless)
 /// 2: shortcuts (switch, default on)
-static CONTROLS: kit::Controls<3> = kit::Controls::new([1.0, 1.0, 1.0]);
+static CONTROLS: kit::Controls<3> = kit::Controls::new([1.0, 0.0, 1.0]);
 kit::controls!(CONTROLS);
 
 const ENABLED: usize = 0;

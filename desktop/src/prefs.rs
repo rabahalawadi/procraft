@@ -90,8 +90,6 @@ pub struct Prefs {
     pub recolor_threshold: f32,
     /// Whether to use WinTab for tablet pen input on Windows (else Windows Ink).
     pub use_wintab: bool,
-    /// Whether fullscreen mode uses exclusive fullscreen (highest refresh rate) or borderless window.
-    pub exclusive_fullscreen: bool,
 }
 
 impl Default for Prefs {
@@ -131,7 +129,6 @@ impl Default for Prefs {
             drag_image_format: 0,
             recolor_threshold: 0.0,
             use_wintab: false,
-            exclusive_fullscreen: true,
         }
     }
 }
@@ -195,7 +192,6 @@ impl Prefs {
                 }
                 "recolor_threshold" => p.recolor_threshold = unit.unwrap_or(0.0),
                 "use_wintab" => p.use_wintab = on,
-                "exclusive_fullscreen" => p.exclusive_fullscreen = on,
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
                 "curve" => {
                     let numbers: Vec<f32> = value.split(',').filter_map(|v| v.parse().ok()).collect();
@@ -249,7 +245,6 @@ impl Prefs {
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
             format!("use_wintab {}", self.use_wintab),
-            format!("exclusive_fullscreen {}", self.exclusive_fullscreen),
         ];
         let lines: Vec<String> = lines.into_iter().chain(self.plugins.kept_lines()).collect();
         crate::files::keep_text("interface", &(lines.join("\n") + "\n"));

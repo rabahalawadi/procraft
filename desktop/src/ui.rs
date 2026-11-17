@@ -67,7 +67,6 @@ pub enum Action {
     Export(Format, u8),
     /// The file a plugin makes of the artwork's layers (by its place among those offered).
     PluginExport(u8),
-    ToggleFullscreen,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2601,7 +2600,6 @@ impl Interface {
                     Some(Act::CopyCanvas) => self.copy_canvas(session),
                     Some(Act::Paste) => self.paste(ctx, false),
                     Some(Act::PastePrivate) => self.paste(ctx, true),
-                    Some(Act::ToggleFullscreen) => self.actions.push(Action::ToggleFullscreen),
                     // the panel does these itself
                     Some(
                         Act::Page(_)
@@ -2612,8 +2610,7 @@ impl Interface {
                         | Act::BrushCursor
                         | Act::ProjectCanvas
                         | Act::ResetInput
-                        | Act::ToggleTabletApi
-                        | Act::ToggleExclusiveFullscreen,
+                        | Act::ToggleTabletApi,
                     )
                     | None => {}
                 }

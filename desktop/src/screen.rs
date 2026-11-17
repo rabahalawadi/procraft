@@ -366,7 +366,10 @@ impl Screen {
         // a surface the GPU refused (it couldn't come idle, another thread submitting work) is asked
         // for again here: only a new size would, and the window would stay as it was until then
         let window = self.window.inner_size();
-        if self.config.is_none() && !is_minimised(window) {
+        if !is_minimised(window)
+            && (self.config.is_none()
+                || self.config.as_ref().is_some_and(|c| c.width != window.width || c.height != window.height))
+        {
             self.resize(window.width, window.height);
         }
         let Some(config) = self.config.as_ref() else {
@@ -377,7 +380,7 @@ impl Screen {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.resize(size.0, size.1);
+                self.resize(window.width, window.height);
                 return Some(Duration::ZERO);
             }
             wgpu::CurrentSurfaceTexture::Timeout
